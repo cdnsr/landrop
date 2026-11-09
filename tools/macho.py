@@ -203,7 +203,7 @@ def parse_macho(data: bytes | bytearray, label: str = "") -> MachOInfo:
                 info.encryption.append(Encryption(
                     cmd_off, cryptoff, cryptsize, cryptid,
                     cmd == LC_ENCRYPTION_INFO_64,
-                    bytes(sl.raw(cryptoff, cryptsize)) if cryptsize else b""))
+                    bytes(sl.raw(cryptoff, cryptsize))))
             elif cmd == LC_MAIN:
                 entryoff = struct.unpack_from("<Q", sl.data, sl.base + cmd_off + 8)[0]
                 info.entryoff.append(entryoff)
