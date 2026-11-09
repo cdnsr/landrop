@@ -1,0 +1,15 @@
+# ignored build/intermediate data
+.ipa-analysis/
+.refs/
+.build/
+.build-cache/
+__pycache__/
+*.pyc
+.macho_analyze.py
+LANDrop-2.8.2.ipa
+LANDrop_2.8.2.ipa
+LANDrop-2.8.2-fixed-unsigned.ipa
+LANDrop-2.8.2-fixed-trollstore.ipa
+LANDrop-2.8.2-decrypted.ipa
+*.decrypted.ipa
+.DS_Store
