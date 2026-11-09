@@ -18,8 +18,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: landrop-ios-${{ github.ref }}
-  cancel-in-progress: true
+  group: landrop-ios-${{ github.ref_name }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   build-ios:
