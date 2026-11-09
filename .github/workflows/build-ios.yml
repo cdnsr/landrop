@@ -71,16 +71,19 @@ jobs:
           mkdir -p .build-cache
           # /releases/tags/$TAG only returns published releases. List releases
           # (drafts are visible with contents:write) and match the tag name.
+          # gh api --jq is evaluated by gojq; --arg is not supported there.
+          TAG_JSON="$(jq -Rn --arg t "$TAG" '$t')"
+          ASSET_JSON_NAME="$(jq -Rn --arg n "$ASSET" '$n')"
           RELEASE_ID="$(gh api --paginate "repos/$GH_REPO/releases" \
-            --jq '[.[] | select(.tag_name == $t and .draft == true)] | sort_by(.created_at) | last | .id // empty' \
-            --arg t "$TAG")"
+            --jq --argjson t "$TAG_JSON" \
+            '[.[] | select(.tag_name == $t and .draft == true)] | sort_by(.created_at) | last | .id // empty')"
           if [[ -z "$RELEASE_ID" ]]; then
             echo "No draft Release found for tag $TAG" >&2
             exit 1
           fi
           ASSET_JSON="$(gh api "repos/$GH_REPO/releases/$RELEASE_ID/assets" \
-            --jq '[.[] | select(.name == $n and (.name | endswith(".ipa")))] | last // empty' \
-            --arg n "$ASSET")"
+            --jq --argjson n "$ASSET_JSON_NAME" \
+            '[.[] | select(.name == $n and (.name | endswith(".ipa")))] | last // empty')"
           if [[ -z "$ASSET_JSON" || "$ASSET_JSON" == "null" ]]; then
             echo "Asset $ASSET not found on draft Release for $TAG" >&2
             exit 1
