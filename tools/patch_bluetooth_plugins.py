@@ -71,18 +71,29 @@ def main(argv: list[str]) -> int:
         print(f"usage: {argv[0]} unpacked-app-root-or-Payload-root", file=sys.stderr)
         return 2
     root = Path(argv[1])
-    # Accept either the Runner.app directory or its parent Payload directory.
-    if (root / "Payload" / "Runner.app" / "Frameworks").is_dir():
-        root = root / "Payload"
+    # Normalize accepted roots: build root, Payload dir, or Runner.app itself.
+    if root.name == "Runner.app" and (root / "Frameworks").is_dir():
+        offset = ""
+        path_root = root.parent.parent  # Payload's parent: build root
+        prefix = "Payload/Runner.app/"
+    elif (root / "Payload" / "Runner.app" / "Frameworks").is_dir():
+        offset = "Payload/"
+        path_root = root
     elif (root / "Runner.app" / "Frameworks").is_dir():
-        # Also accept a root whose Payload directory was omitted by the caller.
-        for rule in RULES:
-            rule = dict(rule)
-            rule["path"] = rule["path"].removeprefix("Payload/")
-            patch(root, rule)
-        return 0
+        offset = ""
+        path_root = root / "Payload"
+    else:
+        raise ValueError(
+            f"{root}: expected Runner.app/Frameworks or Payload/Runner.app/Frameworks")
     for rule in RULES:
-        patch(root, rule)
+        resolved = dict(rule)
+        resolved["path"] = offset + rule["path"].removeprefix("Payload/")
+        if root.name == "Runner.app":
+            # path_root here is the build root; keep the full relative path.
+            resolved["path"] = rule["path"]
+            patch(path_root, resolved)
+        else:
+            patch(root, resolved)
     return 0
 
 
