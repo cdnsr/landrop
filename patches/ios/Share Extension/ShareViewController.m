@@ -342,7 +342,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
                                      NSUInteger index, SharingFileType fileType,
                                      NSString *ext, void (^next)(BOOL)) {
         NSString *type = all[index];
-        [p loadItemForTypeIdentifier:type options:nil completionHandler:^(id<NSSecureCoding> _Nullable item, NSError * _Nullable error) {
+        [p loadItemForTypeIdentifier:type options:nil completionHandler:^(id _Nullable item, NSError * _Nullable error) {
             __strong typeof(weakSelf) self = weakSelf;
             if (!self || error || !item) { next(NO); return; }
             NSDictionary *stored = nil;
@@ -438,7 +438,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
                                      NSUInteger index, SharingFileType type,
                                      NSString *ext, void (^next)(BOOL)) {
         NSString *uti = all[index];
-        [p loadItemForTypeIdentifier:uti options:nil completionHandler:^(id<NSSecureCoding> _Nullable item, NSError * _Nullable error) {
+        [p loadItemForTypeIdentifier:uti options:nil completionHandler:^(id _Nullable item, NSError * _Nullable error) {
             __strong typeof(weakSelf) self = weakSelf;
             if (!self || error || !item) { next(NO); return; }
             NSDictionary *stored = nil;
@@ -467,7 +467,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
                                      NSUInteger index, SharingFileType type,
                                      NSString *ext, void (^next)(BOOL)) {
         [p loadItemForTypeIdentifier:all[index] options:nil
-                   completionHandler:^(id<NSSecureCoding> _Nullable item, NSError * _Nullable error) {
+                   completionHandler:^(id _Nullable item, NSError * _Nullable error) {
             __strong typeof(weakSelf) self = weakSelf;
             if (!self || error || !item) { next(NO); return; }
             NSString *value = nil;
