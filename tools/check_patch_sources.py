@@ -98,7 +98,7 @@ for token in [
     "workflow_dispatch", "cache", "ipa_asset", "github.ref_type",
     "releases", "draft == true", "application/octet-stream",
     "actions/upload-artifact@v4", "check_patch_sources.py",
-    "verify_patched_ipa.py", "macos-14", "compression-level: 0",
+    "verify_patched_ipa.py", "macos-latest", "compression-level: 0",
 ]:
     require(token in workflow, f"Workflow missing: {token}")
 require("decrypted_ipa_url" not in workflow,
