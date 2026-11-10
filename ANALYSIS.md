@@ -102,6 +102,19 @@ GitHub Actions 的 macOS runner 没有授权 Apple ID/设备密钥袋，也没�
 
 **宿主侧补一次前台请求。** ~~插件在注册时若发现 App 不是 active 且存在待处理载荷，就主动 `UIApplication.open` 自己的分享 URL。~~ 这一条在 patch8 中已删除：它运行在 `didFinishLaunchingWithOptions` 内部（插件注册阶段），此时请求系统打开 URL 会让系统直接终止进程，表现就是「一打开就闪退、分享也拉不起来」。而且因为载荷改为不提前删除，每次启动都会检测到待处理载荷、再次自打开、再次崩溃，形成自杀循环。前台切换交给扩展侧完成，宿主不自己打开自己。
 
+## Bug 6：分享偶发失败（三次里前两次闪回桌面）
+
+patch8 之后扩展侧每次都能正确写入载荷并请求启动宿主，但成功与否取决于宿主进程能否活到进入前台。日志对比很直接：
+
+- 失败两次：Runner 2305 / 2312 各自收到 URL（`initial=true`），但**从未出现 `app became active`**，随后进程消失。
+- 成功一次：先是 2319 收到 URL 也没 active，紧接着 2321 才 active 并消费载荷。
+
+也就是宿主被系统以后台方式拉起，冷启动期间扩展已退出，切换请求没人接手，那个半启动的进程被回收——是竞态。
+
+patch9 的修法：扩展不再请求完就退出，而是等 `NSExtensionContext.openURL:completionHandler:` 的回调，回调后再停留 2 秒让宿主完成冷启动，另有 4 秒硬上限防止面板卡死。首选路径也改回文档支持的 context API（此前它一用就崩是另一个 bug，现在没有崩溃了），仅在回调返回失败时才退回响应链 `openURL:`。
+
+宿主侧不参与拉起：插件注册阶段调用 `UIApplication.shared.open` 会直接终止进程（见 Bug 5），而宿主用公开 API 无法把自己带到前台，所以这段代码在 patch9 中彻底移除，`UIApplication.shared.open` 在产物里出现 0 次。
+
 ## Bug 5：patch7 启动即闪退
 
 patch7 在插件注册阶段调用了 `UIApplication.shared.open`，触发系统终止进程。同一版还把扩展的首选打开方式换成了 `NSExtensionContext.openURL:`，而日志证明此前真正生效的是响应链那次调用，换掉后连分享都拉不起 App。patch8 两处都改回：宿主侧完全移除自打开（`UIApplication` 仅剩生命周期方法签名与通知名），扩展侧恢复为响应链 `openURL:` 只调用一次，再延迟 0.8 秒完成请求。
