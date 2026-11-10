@@ -91,32 +91,40 @@ static NSString *LANDropExtensionForType(NSString *uti, NSString *fallback) {
 
 #pragma mark - Post-copy screenshot archive repair
 
-static BOOL LANDropIsArchivedPlist(NSData *data) {
-    return data.length >= 8 && memcmp(data.bytes, "bplist00", 8) == 0;
-}
-
-// The screenshot markup editor can register an in-memory UIImage as
-// public.png. Its file representation is a bplist00 NSKeyedArchiver archive,
-// while the copy destination has a .png name. Repair exactly that file after
-// it has already been copied to the App Group. This never changes the loading,
-// UserDefaults or openURL path that makes the host select the attachment.
+// Screenshot markup can register an in-memory UIImage as public.png, so the
+// copied file is a bplist00 NSKeyedArchiver archive with a .png name. Repair
+// it in place AFTER the copy succeeded. NSKeyedUnarchiver can raise an
+// Objective-C exception for malformed archives or missing classes, and an
+// uncaught exception terminates the extension process (the host would then
+// open with an empty attachment list). Everything here is wrapped so a
+// failure leaves the original file untouched and never aborts the extension.
 static void LANDropRepairArchivedPNGAtURL(NSURL *url) {
-    NSData *data = [NSData dataWithContentsOfURL:url];
-    if (!LANDropIsArchivedPlist(data)) return;
-    NSError *error = nil;
-    id object = [NSKeyedUnarchiver unarchivedObjectOfClasses:
-                 [NSSet setWithObjects:UIImage.class, NSData.class, NSURL.class,
-                  NSString.class, NSNumber.class, NSArray.class,
-                  NSDictionary.class, nil]
-                 fromData:data error:&error];
-    UIImage *image = nil;
-    if ([object isKindOfClass:UIImage.class]) {
-        image = (UIImage *)object;
-    } else if ([object isKindOfClass:NSData.class]) {
-        image = [UIImage imageWithData:(NSData *)object];
+    @try {
+        NSData *data = [NSData dataWithContentsOfURL:url];
+        if (data.length < 8 || memcmp(data.bytes, "bplist00", 8) != 0) return;
+
+        id object = nil;
+        @try {
+            object = [NSKeyedUnarchiver unarchivedObjectOfClasses:
+                      [NSSet setWithObjects:UIImage.class, NSData.class, NSURL.class,
+                       NSString.class, NSNumber.class, NSArray.class,
+                       NSDictionary.class, nil]
+                      fromData:data error:NULL];
+        } @catch (__unused NSException *exception) {
+            object = nil;
+        }
+
+        UIImage *image = nil;
+        if ([object isKindOfClass:UIImage.class]) {
+            image = (UIImage *)object;
+        } else if ([object isKindOfClass:NSData.class]) {
+            image = [UIImage imageWithData:(NSData *)object];
+        }
+        NSData *png = image ? UIImagePNGRepresentation(image) : nil;
+        if (png.length > 0) [png writeToURL:url options:NSDataWritingAtomic error:NULL];
+    } @catch (__unused NSException *exception) {
+        // Keep the copied file as-is; never propagate into the extension.
     }
-    NSData *png = image ? UIImagePNGRepresentation(image) : nil;
-    if (png.length && !error) [png writeToURL:url options:NSDataWritingAtomic error:NULL];
 }
 
 #pragma mark - Thread-safe completion

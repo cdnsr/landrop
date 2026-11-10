@@ -56,8 +56,8 @@ for token in [
     "loadItemForTypeIdentifier",
     "SharingKey", "kSchemePrefix", "SharingFileTypeImage",
     "writeSharedObject", "Library/Preferences", "AppGroupId",
-    "LANDropIsArchivedPlist", "LANDropRepairArchivedPNGAtURL",
-    "NSKeyedUnarchiver", "bplist00",
+    "LANDropRepairArchivedPNGAtURL", "NSKeyedUnarchiver", "bplist00",
+    "@catch (__unused NSException *exception)",
     "dispatch_group_enter", "completeRequestReturningItems",
     "NSFileCoordinator",
 ]:
