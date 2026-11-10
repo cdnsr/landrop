@@ -383,6 +383,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
 @property (nonatomic, strong) LANDropShareState *state;
 @property (nonatomic, assign) BOOL hasStarted;
 @property (nonatomic, assign) BOOL hasFinished;
+- (void)launchViaResponderChain:(NSURL *)url;
 @end
 
 @implementation _TtC15Share_Extension19ShareViewController
@@ -939,39 +940,55 @@ static void LANDropTryTypes(NSItemProvider *provider,
         [context completeRequestReturningItems:@[] completionHandler:nil];
     };
 
-    // Launch the host app the way that is known to work on this system: the
-    // private openURL: on the responder chain, exactly once. The original plugin
-    // called it on every responder, which issues several launches that cancel
-    // each other out.
+    // Ask the system to switch to the host app through the documented
+    // NSExtensionContext API. This is the request the system actually acts on;
+    // the private responder-chain openURL: is kept only as a fallback.
+    __block BOOL requested = NO;
+    if ([context respondsToSelector:@selector(openURL:completionHandler:)]) {
+        requested = YES;
+        [context openURL:url completionHandler:^(BOOL success) {
+            LANDropLog(@"context open finished (success=%d)", success);
+            if (!success) { [self launchViaResponderChain:url]; }
+            // Give the host app time to finish its cold start before this
+            // process disappears; exiting earlier lets the system reclaim the
+            // half-started host process and the share sheet just closes.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), completeOnce);
+        }];
+    }
+    if (!requested) {
+        [self launchViaResponderChain:url];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), completeOnce);
+    }
+
+    // Hard ceiling: never leave the share sheet stuck if the system never calls
+    // back at all.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        LANDropLog(@"finishing extension after launch ceiling");
+        completeOnce();
+    });
+}
+
+/// Legacy launch path: the private openURL: on the responder chain, exactly
+/// once. The original plugin called it on every responder, which issues several
+/// launches that cancel each other out.
+- (void)launchViaResponderChain:(NSURL *)url {
     SEL selector = sel_registerName("openURL:");
     UIResponder *responder = self;
-    BOOL launched = NO;
     while (responder) {
         if ([responder respondsToSelector:selector]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [responder performSelector:selector withObject:url];
 #pragma clang diagnostic pop
-            launched = YES;
-            break;
+            LANDropLog(@"host app launch requested (responderChain=1)");
+            return;
         }
         responder = responder.nextResponder;
     }
-
-    // Fall back to the context API only when the responder chain had no taker.
-    if (!launched && [context respondsToSelector:@selector(openURL:completionHandler:)]) {
-        [context openURL:url completionHandler:^(BOOL success) {
-            LANDropLog(@"context open finished (success=%d)", success);
-        }];
-        launched = YES;
-    }
-    LANDropLog(@"host app launch requested (responderChain=%d)", launched);
-
-    // Keep this process alive briefly after the request. Completing immediately
-    // tears the extension down while the system is still switching apps, and the
-    // launch is cancelled: the share sheet just closes and nothing opens.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), completeOnce);
+    LANDropLog(@"host app launch requested (responderChain=0)");
 }
 
 - (void)finish:(BOOL)success {
