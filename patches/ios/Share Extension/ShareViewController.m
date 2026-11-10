@@ -257,20 +257,9 @@ static BOOL LANDropNormalizeImageFileAtURL(NSURL *url) {
 
 #pragma mark - File copying
 
-// Plain copy first: most providers hand back a readable file in the
-// extension's own container, where NSFileCoordinator only adds a failure mode.
-// Coordination stays as a fallback for provider-hosted URLs.
-static BOOL LANDropCopyItemAtURL(NSURL *source, NSURL *destination) {
-    if (!source.isFileURL || !destination) return NO;
-    NSFileManager *fm = NSFileManager.defaultManager;
-    [fm removeItemAtURL:destination error:NULL];
-    NSError *error = nil;
-    if ([fm copyItemAtURL:source toURL:destination error:&error]) return YES;
-    LANDropLog(@"direct copy failed (%@): %@", source.lastPathComponent,
-               error.localizedDescription);
-    return NO;
-}
-
+// Match the original extension's copy order: NSFileCoordinator first, then a
+// plain copy as a fallback. Album photos hand back security-scoped URLs that
+// the coordinator path is designed for, and that is the path that worked.
 static BOOL LANDropCoordinatedCopyItemAtURL(NSURL *source, NSURL *destination) {
     if (!source.isFileURL || !destination) return NO;
     __block BOOL copied = NO;
@@ -288,6 +277,17 @@ static BOOL LANDropCoordinatedCopyItemAtURL(NSURL *source, NSURL *destination) {
                    coordinationError.localizedDescription);
     }
     return copied;
+}
+
+static BOOL LANDropCopyItemAtURL(NSURL *source, NSURL *destination) {
+    if (!source.isFileURL || !destination) return NO;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm removeItemAtURL:destination error:NULL];
+    NSError *error = nil;
+    if ([fm copyItemAtURL:source toURL:destination error:&error]) return YES;
+    LANDropLog(@"direct copy failed (%@): %@", source.lastPathComponent,
+               error.localizedDescription);
+    return NO;
 }
 
 #pragma mark - Thread-safe completion
@@ -835,8 +835,8 @@ static void LANDropTryTypes(NSItemProvider *provider,
                                     defaultExtension:defaultExtension]];
 
     BOOL accessed = url.isFileURL && [url startAccessingSecurityScopedResource];
-    BOOL copied = LANDropCopyItemAtURL(url, destination);
-    if (!copied) copied = LANDropCoordinatedCopyItemAtURL(url, destination);
+    BOOL copied = LANDropCoordinatedCopyItemAtURL(url, destination);
+    if (!copied) copied = LANDropCopyItemAtURL(url, destination);
     if (accessed) [url stopAccessingSecurityScopedResource];
     if (!copied) return nil;
     return [self storedFileAt:destination type:type];
@@ -855,35 +855,33 @@ static void LANDropTryTypes(NSItemProvider *provider,
     return [self storedFileAt:destination type:type];
 }
 
-- (void)writeSharedObject:(id)value forKey:(NSString *)key {
-    // Standard App Group suite path.
+- (BOOL)writeSharedObject:(id)value forKey:(NSString *)key {
+    // Exactly what flutter_sharing_intent 1.1.1 does, and nothing more: one
+    // write through the App Group suite, then synchronize. Do not also write
+    // the backing plist by hand — that file is owned by cfprefsd, which flushes
+    // its own cached copy over it, and the host app then reads a domain without
+    // the key and opens with nothing selected.
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:self.appGroupId];
+    if (!defaults) {
+        LANDropLog(@"could not open App Group suite %@", self.appGroupId);
+        return NO;
+    }
     [defaults setObject:value forKey:key];
     [defaults synchronize];
 
-    // TrollStore registers App Group containers manually. CFPrefs can resolve
-    // suite domains through either the registered group container or the
-    // process HOME; on some iOS/TrollStore combinations these differ between
-    // the host app and the extension. Also write the exact plist that
-    // UserDefaults(suiteName:) would read, in both candidate locations.
-    NSURL *group = [self containerURL];
-    NSArray<NSURL *> *roots = group
-        ? @[group, [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]]
-        : @[[NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]];
-    for (NSURL *root in roots) {
-        NSURL *dir = [root URLByAppendingPathComponent:@"Library/Preferences" isDirectory:YES];
-        NSURL *file = [dir URLByAppendingPathComponent:
-                       [self.appGroupId stringByAppendingPathExtension:@"plist"]];
-        NSError *error = nil;
-        if (![NSFileManager.defaultManager createDirectoryAtURL:dir
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:&error] || error) continue;
-        NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfURL:file].mutableCopy;
-        if (!plist) plist = [NSMutableDictionary dictionary];
-        plist[key] = value;
-        [plist writeToURL:file atomically:YES];
+    // Read back through the same API the host plugin uses, so a broken handoff
+    // shows up in the log instead of as an app that opens with nothing selected.
+    id stored = [defaults objectForKey:key];
+    if (stored == nil) {
+        LANDropLog(@"suite %@ dropped key %@ (container=%@)", self.appGroupId, key,
+                   [self containerURL] ? @"ok" : @"missing");
+        return NO;
     }
+    NSUInteger length = [stored isKindOfClass:NSData.class] ? [(NSData *)stored length] : 0;
+    LANDropLog(@"stored key %@ (%lu bytes) in suite %@ (container=%@)", key,
+               (unsigned long)length, self.appGroupId,
+               [self containerURL] ? @"ok" : @"missing");
+    return YES;
 }
 
 #pragma mark - Completion
@@ -902,15 +900,14 @@ static void LANDropTryTypes(NSItemProvider *provider,
         NSError *error = nil;
         NSData *json = [NSJSONSerialization dataWithJSONObject:media options:0 error:&error];
         if (json && !error) {
-            [self writeSharedObject:json forKey:kUserDefaultsKey];
-            succeeded = YES;
+            succeeded = [self writeSharedObject:json forKey:kUserDefaultsKey];
         }
-        LANDropLog(@"handing off %lu media item(s), %lu byte(s) of JSON",
-                   (unsigned long)media.count, (unsigned long)json.length);
+        LANDropLog(@"handing off %lu media item(s), %lu byte(s) of JSON (stored=%d)",
+                   (unsigned long)media.count, (unsigned long)json.length, succeeded);
     } else if (texts.count > 0) {
-        [self writeSharedObject:texts forKey:kUserDefaultsKey];
-        succeeded = YES;
-        LANDropLog(@"handing off %lu text item(s)", (unsigned long)texts.count);
+        succeeded = [self writeSharedObject:texts forKey:kUserDefaultsKey];
+        LANDropLog(@"handing off %lu text item(s) (stored=%d)",
+                   (unsigned long)texts.count, succeeded);
     }
 
     if (succeeded) [self openHostAppFragment:fragment];

@@ -55,7 +55,7 @@ for token in [
     "loadDataRepresentationForTypeIdentifier",
     "loadItemForTypeIdentifier",
     "SharingKey", "kSchemePrefix", "SharingFileTypeImage",
-    "writeSharedObject", "Library/Preferences", "AppGroupId",
+    "writeSharedObject", "AppGroupId",
     "LANDropNormalizeImageFileAtURL", "LANDropImageDataFromArchive",
     "LANDropDataLooksLikeImage", "NSKeyedUnarchiver", "bplist00",
     "loadInPlaceFileRepresentationForTypeIdentifier",
@@ -79,6 +79,14 @@ require("UIImagePNGRepresentation" in share,
         "Share extension must convert UIImage screenshot payloads to PNG")
 require("cancelRequestWithError" in share,
         "Share extension must still cancel cleanly when nothing is shareable")
+# The App Group handoff must go through UserDefaults(suiteName:) exactly like
+# the original plugin. Writing the backing plist directly races cfprefsd, which
+# flushes its own cached copy over the file, and the host app then reads a
+# domain without the key: the app opens with nothing selected.
+require("Library/Preferences" not in share,
+        "Share extension must not write the App Group plist behind cfprefsd")
+require("objectForKey:key" in share,
+        "Share extension must read the payload back through the host's API")
 require(share.count("{") == share.count("}"), "Share extension has unbalanced braces")
 
 nib = text("tools/check_share_nib.py")
