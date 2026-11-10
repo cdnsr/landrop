@@ -506,10 +506,11 @@ static void LANDropTryTypes(NSItemProvider *provider,
 }
 
 - (NSDictionary *)storedFileAt:(NSURL *)destination type:(SharingFileType)type {
-    // Legacy JSON shape: value, thumbnail, duration, type(Int).
+    // Match Swift JSONEncoder's output for the host plugin's Codable model:
+    // required keys only; optional nil fields are omitted, not NSNull.
+    // Swift `decodeIfPresent` treats an explicit NSNull as an invalid type for
+    // the optional String/Int properties and aborts decoding of the whole array.
     return @{@"value": destination.absoluteString,
-             @"thumbnail": NSNull.null,
-             @"duration": NSNull.null,
              @"type": @(type)};
 }
 
@@ -552,11 +553,41 @@ static void LANDropTryTypes(NSItemProvider *provider,
     return [self storedFileAt:destination type:type];
 }
 
+- (void)writeSharedObject:(id)value forKey:(NSString *)key {
+    // Standard App Group suite path.
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:self.appGroupId];
+    [defaults setObject:value forKey:key];
+    [defaults synchronize];
+
+    // TrollStore registers App Group containers manually. CFPrefs can resolve
+    // suite domains through either the registered group container or the
+    // process HOME; on some iOS/TrollStore combinations these differ between
+    // the host app and the extension. Also write the exact plist that
+    // UserDefaults(suiteName:) would read, in both candidate locations.
+    NSURL *group = [self containerURL];
+    NSArray<NSURL *> *roots = group
+        ? @[group, [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]]
+        : @[[NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]];
+    for (NSURL *root in roots) {
+        NSURL *dir = [root URLByAppendingPathComponent:@"Library/Preferences" isDirectory:YES];
+        NSURL *file = [dir URLByAppendingPathComponent:
+                       [self.appGroupId stringByAppendingPathExtension:@"plist"]];
+        NSError *error = nil;
+        if (![NSFileManager.defaultManager createDirectoryAtURL:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:&error] || error) continue;
+        NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfURL:file].mutableCopy;
+        if (!plist) plist = [NSMutableDictionary dictionary];
+        plist[key] = value;
+        [plist writeToURL:file atomically:YES];
+    }
+}
+
 #pragma mark - Completion
 
 - (void)saveAndRedirect {
     if (self.hasFinished) return;
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:self.appGroupId];
     NSString *fragment = @"media";
     BOOL succeeded = NO;
     [self.state.lock lock];
@@ -569,13 +600,11 @@ static void LANDropTryTypes(NSItemProvider *provider,
         NSError *error = nil;
         NSData *json = [NSJSONSerialization dataWithJSONObject:media options:0 error:&error];
         if (json && !error) {
-            [defaults setObject:json forKey:kUserDefaultsKey];
-            [defaults synchronize];
+            [self writeSharedObject:json forKey:kUserDefaultsKey];
             succeeded = YES;
         }
     } else if (texts.count > 0) {
-        [defaults setObject:texts forKey:kUserDefaultsKey];
-        [defaults synchronize];
+        [self writeSharedObject:texts forKey:kUserDefaultsKey];
         succeeded = YES;
     }
 
@@ -584,6 +613,10 @@ static void LANDropTryTypes(NSItemProvider *provider,
 }
 
 - (void)openHostAppFragment:(NSString *)fragment {
+    [self loadIds];
+    // Host plugin checks `hasPrefix("SharingMedia-<bundle id>")`, then reads
+    // url.host?.components(separatedBy: "=").last as the UserDefaults key and
+    // url.fragment as the payload type. Keep this exact legacy format.
     NSString *raw = [NSString stringWithFormat:@"%@-%@://dataUrl=%@#%@",
                      kSchemePrefix, self.hostAppBundleIdentifier,
                      kUserDefaultsKey, fragment];
@@ -591,23 +624,22 @@ static void LANDropTryTypes(NSItemProvider *provider,
     if (!url) { [self finish:NO]; return; }
 
     self.hasFinished = YES;
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        __strong typeof(weakSelf) self = weakSelf;
-        if (!self) return;
-        SEL selector = sel_registerName("openURL:");
-        UIResponder *responder = self;
-        while (responder) {
-            if ([responder respondsToSelector:selector]) {
+    // Match flutter_sharing_intent 1.1.1 exactly: call openURL on every
+    // responder that implements it (do not break after the first), synchronously,
+    // then completeRequest. Deferring openURL to a later runloop turn allowed
+    // the extension to be killed before the host received the URL.
+    SEL selector = sel_registerName("openURL:");
+    UIResponder *responder = self;
+    while (responder) {
+        if ([responder respondsToSelector:selector]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [responder performSelector:selector withObject:url];
+            [responder performSelector:selector withObject:url];
 #pragma clang diagnostic pop
-            }
-            responder = responder.nextResponder;
         }
-        [self.extensionContext completeRequestReturningItems:@[] completionHandler:nil];
-    });
+        responder = responder.nextResponder;
+    }
+    [self.extensionContext completeRequestReturningItems:@[] completionHandler:nil];
 }
 
 - (void)finish:(BOOL)success {

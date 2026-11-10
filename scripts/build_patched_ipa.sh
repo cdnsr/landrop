@@ -47,6 +47,13 @@ find "$APP" -type d -name _CodeSignature -prune -exec rm -rf {} +
 find "$APP" -type d -name SC_Info -prune -exec rm -rf {} +
 /usr/libexec/PlistBuddy -c "Delete :ITSDRMScheme" "$APP/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Delete :UISupportedDevices" "$APP/Info.plist" 2>/dev/null || true
+# Be explicit about the suite name: compiled flutter_sharing_intent 1.1.1
+# derives group.<bundle id> when AppGroupId is absent, but writing it into
+# both Info.plist files removes any ambiguity for the host and the extension.
+/usr/libexec/PlistBuddy -c "Set :AppGroupId group.app.landrop.landrop-flutter" "$APP/Info.plist" || \
+  /usr/libexec/PlistBuddy -c "Add :AppGroupId string group.app.landrop.landrop-flutter" "$APP/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :AppGroupId group.app.landrop.landrop-flutter" "$SHARE/Info.plist" || \
+  /usr/libexec/PlistBuddy -c "Add :AppGroupId string group.app.landrop.landrop-flutter" "$SHARE/Info.plist"
 
 # 3. Disable the two hard-coded CoreBluetooth power alerts. This patches two
 # 4-byte immediates inside already-unencrypted plugin dylibs and deliberately

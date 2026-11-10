@@ -80,6 +80,11 @@ def main(argv: list[str]) -> int:
         scheme = app_info.get("CFBundleURLTypes", [{}])[0].get("CFBundleURLSchemes", [None])[0]
         if scheme != "SharingMedia-app.landrop.landrop-flutter":
             errors.append(f"unexpected sharing URL scheme: {scheme}")
+        if app_info.get("AppGroupId") != EXPECTED_GROUP:
+            errors.append("app Info.plist AppGroupId missing/wrong")
+        share_info = plistlib.loads(get(SHARE + "/Info.plist"))
+        if share_info.get("AppGroupId") != EXPECTED_GROUP:
+            errors.append("Share Extension Info.plist AppGroupId missing/wrong")
 
         # NIB must be the untouched original; the replacement executable defines
         # a class whose runtime name is exactly the original Swift mangle.

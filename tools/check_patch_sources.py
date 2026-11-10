@@ -55,6 +55,7 @@ for token in [
     "loadDataRepresentationForTypeIdentifier",
     "loadItemForTypeIdentifier",
     "SharingKey", "kSchemePrefix", "SharingFileTypeImage",
+    "writeSharedObject", "Library/Preferences", "AppGroupId",
     "dispatch_group_enter", "completeRequestReturningItems",
     "NSFileCoordinator",
 ]:
@@ -82,7 +83,7 @@ for token in [
     "check_decrypted_ipa.py", "patch_bluetooth_plugins.py",
     "check_share_nib.py", "prepare_entitlements.py",
     "ShareViewController.m", "main.m", "-Wl,-e,_NSExtensionMain",
-    "--allow-encrypted-share", "--entitlements", "ITSDRMScheme", "UISupportedDevices", "SC_Info",
+    "--allow-encrypted-share", "AppGroupId", "--entitlements", "ITSDRMScheme", "UISupportedDevices", "SC_Info",
     "cryptid", "-fixed-trollstore.ipa",
 ]:
     require(token in script, f"Build script missing: {token}")
