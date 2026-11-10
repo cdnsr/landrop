@@ -98,7 +98,7 @@ FLUTTER_MODULES="$APP/Frameworks/Flutter.framework/Modules"
   -I "$FLUTTER_MODULES" \
   -F "$APP/Frameworks" \
   -framework Flutter -framework Foundation -framework UIKit \
-  -install_name "@rpath/flutter_sharing_intent.framework/flutter_sharing_intent" \
+  -Xlinker -install_name -Xlinker "@rpath/flutter_sharing_intent.framework/flutter_sharing_intent" \
   -o "$PLUGIN_DIR/flutter_sharing_intent.new" \
   "$ROOT/patches/ios/SharingIntent/SharingIntentPlugin.swift"
 chmod +x "$PLUGIN_DIR/flutter_sharing_intent.new"
