@@ -1,16 +1,13 @@
 //  ShareViewController.m
 //  Share Extension replacement for LANDrop 2.8.2 / flutter_sharing_intent 1.1.1.
 //
-//  The original Swift extension only accepted `public.image` via loadItem and
-//  force-cast the result to NSURL. Screenshot providers commonly return
-//  UIImage/NSData or concrete UTIs, so the cast fails and the extension closes
-//  immediately ("flashes"). This implementation tries file, data and legacy
-//  item representations in order, copies payloads into the App Group inside
-//  the callback, then writes the exact legacy JSON / UserDefaults / URL scheme
-//  expected by the already compiled host plugin.
-//
-//  Pure Objective-C avoids Swift ABI / compatibility-library mismatches. The
-//  runtime class name matches the original NIB's UIClassSwapper string.
+//  Restores the known-good payload handoff from commit 04c05d2 (automatic
+//  file selection after sharing) and adds a narrowly scoped content check:
+//  screenshot providers may return a `bplist00` NSKeyedArchiver archive of a
+//  UIImage while claiming public.png. That archive is not a PNG and must never
+//  be copied as a .png file. For such data we decode the archived object and
+//  write a real PNG. All other representations keep the original known-good
+//  load/copy path, so album photos and HEIC/JPEG files are not regressed.
 
 #import "ShareExtension.h"
 #import <MobileCoreServices/MobileCoreServices.h>
@@ -90,83 +87,39 @@ static NSString *LANDropExtensionForType(NSString *uti, NSString *fallback) {
     return fallback;
 }
 
-#pragma mark - Image content normalization
+#pragma mark - Screenshot archive repair
 
 static BOOL LANDropIsArchivedPlist(NSData *data) {
     return data.length >= 8 && memcmp(data.bytes, "bplist00", 8) == 0;
 }
 
-// Validate arbitrary bytes with ImageIO and return the original data plus the
-// real filename extension. Returns NO for NSKeyedArchiver plists, abstract
-// public.image placeholders, PDFs and other non-image data.
-static BOOL LANDropNormalizedImage(NSData *data,
-                                   NSData *__autoreleasing *outData,
-                                   NSString *__autoreleasing *outExtension) {
-    if (!data.length || LANDropIsArchivedPlist(data)) return NO;
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-    if (!source) return NO;
-    BOOL valid = NO;
-    if (CGImageSourceGetCount(source) > 0) {
-        CFStringRef container = CGImageSourceGetType(source);
-        NSString *identifier = container ? (__bridge NSString *)container : nil;
-        BOOL conformsToImage = identifier &&
-            UTTypeConformsTo((__bridge CFStringRef)identifier, kUTTypeImage);
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-        if (conformsToImage && image) {
-            NSString *extension = nil;
-            if (@available(iOS 14.0, *)) {
-                extension = [[UTType typeWithIdentifier:identifier] preferredFilenameExtension];
-            }
-            if (extension.length == 0) extension = LANDropExtensionForType(identifier, @"png");
-            if (outData) *outData = data;
-            if (outExtension) *outExtension = extension;
-            valid = YES;
-        }
-        if (image) CFRelease(image);
+// The screenshot markup editor can register an in-memory UIImage as
+// public.png. NSItemProvider's file/data representations then contain a
+// bplist00 NSKeyedArchiver archive, not PNG bytes. This helper returns a real
+// PNG for exactly that case; all other data is left untouched.
+static NSData *LANDropRepairScreenshotData(NSData *data) {
+    if (!LANDropIsArchivedPlist(data)) return nil;
+    NSError *error = nil;
+    id object = nil;
+    if (@available(iOS 11.0, *)) {
+        object = [NSKeyedUnarchiver unarchivedObjectOfClasses:
+                  [NSSet setWithObjects:UIImage.class, NSData.class, NSURL.class,
+                   NSString.class, NSNumber.class, NSArray.class, NSDictionary.class, nil]
+                  fromData:data error:&error];
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        object = [NSKeyedUnarchiver unarchiveObjectWithData:data];
+#pragma clang diagnostic pop
     }
-    CFRelease(source);
-    return valid;
-}
-
-static BOOL LANDropImageDataFromItem(id item,
-                                     NSData *__autoreleasing *outData,
-                                     NSString *__autoreleasing *outExtension) {
-    if (!item) return NO;
-    if ([item isKindOfClass:UIImage.class]) {
-        NSData *png = UIImagePNGRepresentation((UIImage *)item);
-        if (!png.length) return NO;
-        if (outData) *outData = png;
-        if (outExtension) *outExtension = @"png";
-        return YES;
+    if (error || !object) return nil;
+    UIImage *image = nil;
+    if ([object isKindOfClass:UIImage.class]) {
+        image = (UIImage *)object;
+    } else if ([object isKindOfClass:NSData.class]) {
+        image = [UIImage imageWithData:(NSData *)object];
     }
-    if ([item isKindOfClass:NSData.class]) {
-        return LANDropNormalizedImage((NSData *)item, outData, outExtension);
-    }
-    if ([item isKindOfClass:NSURL.class] && ((NSURL *)item).isFileURL) {
-        NSURL *url = (NSURL *)item;
-        BOOL accessed = [url startAccessingSecurityScopedResource];
-        NSData *data = [NSData dataWithContentsOfURL:url];
-        if (accessed) [url stopAccessingSecurityScopedResource];
-        return LANDropNormalizedImage(data, outData, outExtension);
-    }
-    return NO;
-}
-
-static BOOL LANDropImageDataFromFileURL(NSURL *url,
-                                        NSData *__autoreleasing *outData,
-                                        NSString *__autoreleasing *outExtension) {
-    BOOL accessed = url.isFileURL && [url startAccessingSecurityScopedResource];
-    __block NSData *bytes = nil;
-    NSFileCoordinator *coordinator = [NSFileCoordinator new];
-    NSError *coordinationError = nil;
-    [coordinator coordinateReadingItemAtURL:url options:NSFileCoordinatorReadingWithoutChanges
-                                       error:&coordinationError
-                                  byAccessor:^(NSURL *source) {
-        bytes = [NSData dataWithContentsOfURL:source];
-    }];
-    if (accessed) [url stopAccessingSecurityScopedResource];
-    if (coordinationError) return NO;
-    return LANDropNormalizedImage(bytes, outData, outExtension);
+    return image ? UIImagePNGRepresentation(image) : nil;
 }
 
 #pragma mark - Thread-safe completion
@@ -370,14 +323,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
             [p loadFileRepresentationForTypeIdentifier:type completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
                 __strong typeof(weakSelf) self = weakSelf;
                 if (!self || error || !url) { next(NO); return; }
-                NSData *imageData = nil;
-                NSString *extension = nil;
-                if (!LANDropImageDataFromFileURL(url, &imageData, &extension)) {
-                    next(NO);
-                    return;
-                }
-                NSDictionary *stored = [self storeData:imageData type:SharingFileTypeImage
-                                      defaultExtension:extension ?: @"png"];
+                NSDictionary *stored = [self storeImageURL:url requestedType:type];
                 if (stored) { [self.state addMedia:stored]; next(YES); }
                 else next(NO);
             }];
@@ -404,14 +350,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
             [p loadDataRepresentationForTypeIdentifier:type completionHandler:^(NSData * _Nullable data, NSError * _Nullable error) {
                 __strong typeof(weakSelf) self = weakSelf;
                 if (!self || error || !data) { next(NO); return; }
-                NSData *imageData = nil;
-                NSString *extension = nil;
-                if (!LANDropNormalizedImage(data, &imageData, &extension)) {
-                    next(NO);
-                    return;
-                }
-                NSDictionary *stored = [self storeData:imageData type:SharingFileTypeImage
-                                      defaultExtension:extension ?: @"png"];
+                NSDictionary *stored = [self storeImageData:data requestedType:type];
                 if (stored) { [self.state addMedia:stored]; next(YES); }
                 else next(NO);
             }];
@@ -434,33 +373,22 @@ static void LANDropTryTypes(NSItemProvider *provider,
                                      NSUInteger index, SharingFileType fileType,
                                      NSString *ext, void (^next)(BOOL)) {
         NSString *type = all[index];
-        if ([p canLoadObjectOfClass:UIImage.class]) {
-            [p loadObjectOfClass:UIImage.class
-               completionHandler:^(UIImage * _Nullable image, NSError * _Nullable objectError) {
-                __strong typeof(weakSelf) self = weakSelf;
-                if (!self || objectError || !image) { next(NO); return; }
-                NSData *imageData = nil;
-                NSString *extension = nil;
-                if (!LANDropImageDataFromItem(image, &imageData, &extension)) {
-                    next(NO);
-                    return;
-                }
-                NSDictionary *stored = [self storeData:imageData type:SharingFileTypeImage
-                                      defaultExtension:extension ?: @"png"];
-                if (stored) { [self.state addMedia:stored]; next(YES); }
-                else next(NO);
-            }];
-            return;
-        }
         [p loadItemForTypeIdentifier:type options:nil completionHandler:^(id _Nullable item, NSError * _Nullable error) {
             __strong typeof(weakSelf) self = weakSelf;
             if (!self || error || !item) { next(NO); return; }
-            NSData *imageData = nil;
-            NSString *extension = nil;
             NSDictionary *stored = nil;
-            if (LANDropImageDataFromItem(item, &imageData, &extension)) {
-                stored = [self storeData:imageData type:SharingFileTypeImage
-                        defaultExtension:extension ?: @"png"];
+            if ([item isKindOfClass:NSURL.class]) {
+                stored = [self storeImageURL:(NSURL *)item requestedType:type];
+            } else if ([item isKindOfClass:UIImage.class]) {
+                NSData *data = UIImagePNGRepresentation((UIImage *)item);
+                if (data) stored = [self storeData:data type:SharingFileTypeImage
+                                  defaultExtension:@"png"];
+            } else if ([item isKindOfClass:NSData.class]) {
+                stored = [self storeImageData:(NSData *)item requestedType:type];
+            } else if ([item isKindOfClass:NSString.class] &&
+                       [NSURL URLWithString:(NSString *)item]) {
+                stored = [self storeImageURL:[NSURL URLWithString:(NSString *)item]
+                                requestedType:type];
             }
             if (stored) { [self.state addMedia:stored]; next(YES); }
             else next(NO);
@@ -587,30 +515,29 @@ static void LANDropTryTypes(NSItemProvider *provider,
 
 #pragma mark - Storage
 
+- (void)append:(NSDictionary *)file {
+    [self.state addMedia:file];
+}
+
 - (NSURL *)containerURL {
     return [NSFileManager.defaultManager
             containerURLForSecurityApplicationGroupIdentifier:self.appGroupId];
 }
 
-- (NSString *)uniqueName:(NSString *)candidate defaultExtension:(NSString *)ext {
-    NSString *name = candidate.lastPathComponent ?: @"";
+- (NSString *)uniqueName:(NSString *)name defaultExtension:(NSString *)ext {
     if (name.length == 0 || [name isEqualToString:@"/"]) {
         return [NSString stringWithFormat:@"LANDrop-%@.%@", NSUUID.UUID.UUIDString, ext];
     }
     if (name.pathExtension.length == 0) {
         return [name stringByAppendingPathExtension:ext];
     }
-    // Avoid collisions when the same filename is shared repeatedly.
     NSString *base = name.stringByDeletingPathExtension;
     return [NSString stringWithFormat:@"%@-%@.%@", base,
             [NSUUID.UUID.UUIDString substringToIndex:8], name.pathExtension];
 }
 
 - (NSDictionary *)storedFileAt:(NSURL *)destination type:(SharingFileType)type {
-    // Match Swift JSONEncoder's output for the host plugin's Codable model:
-    // required keys only; optional nil fields are omitted, not NSNull.
-    // Swift `decodeIfPresent` treats an explicit NSNull as an invalid type for
-    // the optional String/Int properties and aborts decoding of the whole array.
+    // Match Swift JSONEncoder: optional nil fields are omitted, not NSNull.
     return @{@"value": destination.absoluteString,
              @"type": @(type)};
 }
@@ -621,7 +548,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
     NSURL *container = [self containerURL];
     if (!container) return nil;
     NSURL *destination = [container
-        URLByAppendingPathComponent:[self uniqueName:url.absoluteString
+        URLByAppendingPathComponent:[self uniqueName:url.lastPathComponent
                                     defaultExtension:defaultExtension]];
 
     BOOL accessed = url.isFileURL && [url startAccessingSecurityScopedResource];
@@ -652,6 +579,43 @@ static void LANDropTryTypes(NSItemProvider *provider,
     NSError *error = nil;
     if (![data writeToURL:destination options:NSDataWritingAtomic error:&error] || error) return nil;
     return [self storedFileAt:destination type:type];
+}
+
+- (NSDictionary *)storeImageURL:(NSURL *)url requestedType:(NSString *)type {
+    // Screenshot markup may register an in-memory UIImage under public.png.
+    // Its file representation is a bplist00 keyed archive instead of a PNG.
+    // For any PNG-declared representation, read the first bytes; only perform
+    // work when the archive is present. A real PNG/JPEG/HEIC is untouched.
+    BOOL pngLike = [type isEqualToString:LANDropUTTypePNG()] ||
+                   [type isEqualToString:@"public.png"];
+    if (!pngLike) {
+        return [self storeURL:url type:SharingFileTypeImage
+              defaultExtension:LANDropExtensionForType(type, @"png")];
+    }
+
+    BOOL accessed = url.isFileURL && [url startAccessingSecurityScopedResource];
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    if (accessed) [url stopAccessingSecurityScopedResource];
+    if (!LANDropIsArchivedPlist(data)) {
+        return [self storeURL:url type:SharingFileTypeImage
+              defaultExtension:LANDropExtensionForType(type, @"png")];
+    }
+
+    NSData *png = LANDropRepairScreenshotData(data);
+    if (png) return [self storeData:png type:SharingFileTypeImage defaultExtension:@"png"];
+    // Never copy a bplist archive as .png. Returning nil lets the caller fall
+    // back to loadDataRepresentation / loadItem on the same provider.
+    return nil;
+}
+
+- (NSDictionary *)storeImageData:(NSData *)data requestedType:(NSString *)type {
+    if (LANDropIsArchivedPlist(data)) {
+        NSData *png = LANDropRepairScreenshotData(data);
+        if (png) return [self storeData:png type:SharingFileTypeImage defaultExtension:@"png"];
+        return nil;
+    }
+    return [self storeData:data type:SharingFileTypeImage
+          defaultExtension:LANDropExtensionForType(type, @"png")];
 }
 
 - (void)writeSharedObject:(id)value forKey:(NSString *)key {
@@ -754,9 +718,9 @@ static void LANDropTryTypes(NSItemProvider *provider,
             [self.extensionContext completeRequestReturningItems:@[] completionHandler:nil];
         } else {
             NSError *error = [NSError errorWithDomain:@"app.landrop.share-extension"
-                                                 code:-1
-                                             userInfo:@{NSLocalizedDescriptionKey:
-                                                        @"Unable to load shared content"}];
+                                                code:-1
+                                            userInfo:@{NSLocalizedDescriptionKey:
+                                                       @"Unable to load shared content"}];
             [self.extensionContext cancelRequestWithError:error];
         }
     });

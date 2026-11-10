@@ -56,9 +56,9 @@ for token in [
     "loadItemForTypeIdentifier",
     "SharingKey", "kSchemePrefix", "SharingFileTypeImage",
     "writeSharedObject", "Library/Preferences", "AppGroupId",
-    "LANDropIsArchivedPlist", "CGImageSourceCreateWithData",
-    "CGImageSourceGetType", "canLoadObjectOfClass",
-    "preferredFilenameExtension", "LANDropImageDataFromItem",
+    "LANDropIsArchivedPlist", "LANDropRepairScreenshotData",
+    "NSKeyedUnarchiver", "bplist00", "storeImageURL", "storeImageData",
+    "Never copy a bplist archive as .png",
     "dispatch_group_enter", "completeRequestReturningItems",
     "NSFileCoordinator",
 ]:
