@@ -19,6 +19,8 @@
 
 - `ANALYSIS.md`：逆向证据、两个 bug 成因、二进制补丁与巨魔签名机制的完整分析。
 - `patches/ios/Share Extension/ShareViewController.m`：新的纯 ObjC 分享扩展，修复系统截图分享。
+- `patches/ios/SharingIntent/SharingIntentPlugin.swift`：替换的宿主侧分享插件，修复「App 打开但没选中文件」。
+- `tools/check_plugin_symbols.py`：校验替换插件的导出符号与 install name，确保是 ABI 兼容的 drop-in。
 - `patches/ios/Share Extension/main.m`、`ShareExtension.h`：扩展入口与类名/枚举声明。
 - `tools/patch_bluetooth_plugins.py`：对两个未加密蓝牙插件各打 4 字节，关闭 power alert 默认值。
 - `tools/check_share_nib.py`：确认原 NIB 的 42 字节 Swift 类名及长度前缀未被破坏。
@@ -73,7 +75,19 @@ bash scripts/build_patched_ipa.sh
 group.app.landrop.landrop-flutter
 ```
 
-5. 若截图分享仍失败，App Group 内的 `Library/Logs/landrop-share.log` 会记录每个 provider 走了哪种表示、复制与图片规范化结果，据此定位是载荷问题还是宿主未响应。
+5. 若分享仍失败，App Group 内的 `Library/Logs/landrop-share.log` 会同时记录扩展侧与宿主侧（`[host]` 前缀）的三段过程：载荷写入、宿主取到、投递到哪条通道。取文件方式见下节。
+
+## 取诊断日志
+
+`Library/Logs/landrop-share.log` 在 App Group 容器里，路径形如：
+
+```text
+/var/mobile/Containers/Shared/AppGroup/<UUID>/Library/Logs/landrop-share.log
+```
+
+`<UUID>` 因机而异。用 TrollStore 版 Filza 进 `/var/mobile/Containers/Shared/AppGroup/`，逐个 UUID 看 `.com.apple.mobile_container_manager.metadata.plist`，`MCMMetadataIdentifier` 为 `group.app.landrop.landrop-flutter` 的那个就是。
+
+也可以完全不碰文件：数据线连电脑用 3uTools 的「实时日志」，过滤 `LANDropShare`，日志是实时打出来的，含扩展被系统杀掉前的最后一行。
 
 ## 关于“改成设置中的选项”
 

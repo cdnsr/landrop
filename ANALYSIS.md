@@ -75,6 +75,23 @@ GitHub Actions 的 macOS runner 没有授权 Apple ID/设备密钥袋，也没�
 - 宿主 URL 仍是 `SharingMedia-app.landrop.landrop-flutter://dataUrl=SharingKey#media`（或 `#text/#url`），与已编译的 `flutter_sharing_intent` 和 Dart AOT 完全兼容。
 - `main.m` 引用 Foundation 的 `NSExtensionMain`，链接器用 `-Wl,-e,_NSExtensionMain` 设置入口；纯 ObjC 避免 Swift ABI/兼容库问题。
 
+## Bug 3：App 打开了但没有选中任何文件
+
+扩展侧日志显示载荷写入、回读、URL 发出全部成功，问题在宿主。原 `flutter_sharing_intent 1.1.1` 的交接是**不对称**的：
+
+- 冷启动走 `didFinishLaunchingWithOptions` → `handleUrl(setInitialData: true)`，只把数据存进 `initialSharing`，**不回放给事件流**；
+- 热启动走 `application(_:open:options:)` → `handleUrl(setInitialData: false)`，只把数据推给事件流，**不写 `initialSharing`**。
+
+于是 Dart 侧只要读的是另一条通道，或者订阅时机错过推送，载荷就被无声丢弃——表现正是 App 到前台但什么都没选中。
+
+`patches/ios/SharingIntent/SharingIntentPlugin.swift` 是替换实现，编译进同路径的 `flutter_sharing_intent.framework`：
+
+- 保留 Runner 直接引用的 mangled 符号（`...SwiftFlutterSharingIntentPluginC8instanceACvau`）与 ObjC 类 `FlutterSharingIntentPlugin`，是 ABI 兼容的 drop-in；`tools/check_plugin_symbols.py` 在打包前校验这些导出符号。
+- 交接改为不依赖 URL 时机：扩展写入载荷时同时写 `SharingTimestamp`；插件在注册、启动、`onListen`、`didBecomeActive` 四个时机各尝试取一次，取到即消费并清空，避免重放旧分享。
+- 哪条通道就绪就走哪条：有事件流监听就推送，否则留在 `initialSharing` 等 `getInitialSharing`；`onListen` 时若发现有滞留载荷会补发，原插件在这里会把它晾死。
+- JSON 形状与 `type` 取值（text=0/url=1/image=2/video=3/file=4）保持不变，`value` 的 `file://` 前缀照旧去掉，因为 Dart 侧把它当文件路径用。
+- 宿主侧也写同一份 `landrop-share.log`（带 `[host]` 标记），一次取文件即可看到「写入 → 取到 → 投递」三段。
+
 ## 签名与 entitlements（巨魔专用）
 
 TrollStore 2.x 会：从每个 Mach-O 的 `LC_CODE_SIGNATURE` dump entitlements → 用 `ldid` 递归 ad-hoc 伪造签名 → 对所有 Mach-O 应用 CoreTrust bypass → 注册 App Group 容器与 PlugIns。它**不会**读取 bundle 里另放的 `entitlements.plist`，也不会展开 Xcode 变量 `$(AppIdentifierPrefix)`。完全不签名会导致 app 与 appex 拿不到共享 App Group。
