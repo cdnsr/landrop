@@ -88,6 +88,10 @@ require("Library/Preferences" not in share,
         "Share extension must not write the App Group plist behind cfprefsd")
 require("objectForKey:key" in share,
         "Share extension must read the payload back through the host's API")
+# The extension must not tear itself down the instant it asks for the switch,
+# or the system cancels the launch and the share sheet just closes.
+require("completeOnce" in share,
+        "Share extension must delay completion until the host app is switched to")
 require(share.count("{") == share.count("}"), "Share extension has unbalanced braces")
 
 nib = text("tools/check_share_nib.py")
@@ -107,10 +111,18 @@ for token in [
     "SharingTimestamp",
     "deliverPending",
     "preferEventSink",
+    "requestForegroundIfNeeded",
+    "willEnterForeground",
 ]:
     require(token in plugin, f"host plugin replacement missing: {token}")
 require("didBecomeActive" in plugin,
         "host plugin must retry the handoff when the app becomes active")
+# The payload must survive the process that first reads it: the system can spawn
+# Runner for the URL and kill it before Dart ever asks for the share.
+require("func consume()" in plugin,
+        "host plugin must clear the payload only after Dart consumed it")
+require(plugin.count("consume()") >= 3,
+        "host plugin must call consume() from both delivery paths")
 
 symbols = text("tools/check_plugin_symbols.py")
 require("instanceACvau" in symbols, "plugin symbol check missing the instance symbol")

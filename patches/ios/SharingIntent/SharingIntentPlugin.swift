@@ -55,6 +55,10 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
     private var latestSharing: String?
     private var eventSink: FlutterEventSink?
     private var appGroupId: String = ""
+    /// Timestamp of the share this process has already handed over.
+    private var deliveredStamp: Double = -1
+    /// True when the current share went out through the event stream.
+    private var deliveredToStream = false
 
     public override init() {
         super.init()
@@ -63,6 +67,13 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
             self,
             selector: #selector(applicationDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification,
+            object: nil)
+        // A share can also arrive while the app sits in the background; try the
+        // foreground request again as soon as the app comes back.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
             object: nil)
     }
 
@@ -90,6 +101,26 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         // The extension has usually written the payload before the engine
         // finished booting, so look for it immediately.
         instance.deliverPending(preferEventSink: false, reason: "registration")
+        instance.requestForegroundIfNeeded()
+    }
+
+    /// A share can spawn Runner in the background without ever activating it:
+    /// the system creates the process, hands over the URL, and leaves the app
+    /// behind the share sheet. Asking to open our own sharing URL brings the app
+    /// forward the same way a user tap would.
+    private func requestForegroundIfNeeded() {
+        guard UIApplication.shared.applicationState != .active else { return }
+        guard let pending = UserDefaults(suiteName: appGroupId)?.double(forKey: kTimestampKey),
+              pending > 0 else { return }
+
+        let bundleId = Bundle.main.bundleIdentifier ?? kFallbackBundleId
+        guard let url = URL(string: "\(kSchemePrefix)-\(bundleId)://dataUrl=\(kUserDefaultsKey)#media") else {
+            return
+        }
+        log("app not active with a pending share; requesting foreground")
+        UIApplication.shared.open(url, options: [:]) { success in
+            self.log("foreground request finished (success=\(success))")
+        }
     }
 
     // MARK: - Method channel
@@ -98,10 +129,16 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         switch call.method {
         case "getInitialSharing":
             deliverPending(preferEventSink: false, reason: "getInitialSharing")
-            let payload = initialSharing
+            // Only hand the payload over if the stream did not already take it;
+            // the two paths are alternatives, not a fan-out.
+            let payload = deliveredToStream ? nil : initialSharing
             initialSharing = nil
             latestSharing = nil
-            log("getInitialSharing -> \(payload.map { "\($0.count) chars" } ?? "nil")")
+            log("getInitialSharing -> \(payload.map { "\($0.count) chars" } ?? "nil")"
+                + " (stream=\(deliveredToStream))")
+            // Dart is demonstrably alive at this point, so the share is now
+            // safely in its hands and can be cleared for the next one.
+            if payload != nil { consume() }
             result(payload)
 
         case "reset":
@@ -133,7 +170,9 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         if let pending = initialSharing {
             initialSharing = nil
             latestSharing = pending
+            deliveredToStream = true
             events(pending)
+            consume()
             log("stream listener attached; replayed held payload (\(pending.count) chars)")
         } else {
             deliverPending(preferEventSink: true, reason: "onListen")
@@ -143,6 +182,8 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
 
     public func onCancel(withArguments arguments: Any?) -> FlutterError? {
         eventSink = nil
+        // The listener going away does not mean the payload was consumed.
+        deliveredToStream = false
         return nil
     }
 
@@ -183,6 +224,13 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         // The share sheet can foreground the app before any Dart code is ready.
         // This is the last chance to hand the payload over.
         deliverPending(preferEventSink: true, reason: "didBecomeActive")
+        log("app became active")
+    }
+
+    @objc private func applicationWillEnterForeground() {
+        // Coming back from the background: hand over anything still pending.
+        // Do not request the foreground here, the app is already on its way.
+        deliverPending(preferEventSink: true, reason: "willEnterForeground")
     }
 
     // MARK: - URL handling
@@ -201,8 +249,11 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
 
     // MARK: - Pending payload
 
-    /// Reads the payload the extension left in the App Group, delivers it once
-    /// and removes it so a later launch cannot replay a stale share.
+    /// Reads the payload the extension left in the App Group and hands it to the
+    /// Dart side. The payload is deliberately NOT removed here: the process that
+    /// picks it up can be torn down before Dart ever asks for it (the system
+    /// spawns Runner for the URL, then kills it when the share sheet closes).
+    /// It is cleared only after Dart actually consumes it, see `consume`.
     private func deliverPending(preferEventSink: Bool, reason: String) {
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
             log("\(reason): could not open suite \(appGroupId)")
@@ -211,6 +262,9 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         let stamp = defaults.double(forKey: kTimestampKey)
         guard stamp > 0 else { return }
 
+        // Same share already handed over in this process; do not deliver twice.
+        guard stamp != deliveredStamp else { return }
+
         guard let json = pendingJson(from: defaults) else {
             log("\(reason): payload present but undecodable; discarding")
             defaults.removeObject(forKey: kUserDefaultsKey)
@@ -218,18 +272,28 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
             return
         }
 
-        defaults.removeObject(forKey: kUserDefaultsKey)
-        defaults.removeObject(forKey: kTimestampKey)
-        defaults.synchronize()
-
+        deliveredStamp = stamp
         latestSharing = json
+
         if preferEventSink, let sink = eventSink {
             sink(json)
+            deliveredToStream = true
+            consume()
             log("\(reason): delivered \(json.count) chars to stream")
         } else {
             initialSharing = json
             log("\(reason): held \(json.count) chars for getInitialSharing")
         }
+    }
+
+    /// Drops the payload from the App Group once Dart has taken it, so a later
+    /// launch cannot replay a share the user already handled.
+    private func consume() {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+        defaults.removeObject(forKey: kUserDefaultsKey)
+        defaults.removeObject(forKey: kTimestampKey)
+        defaults.synchronize()
+        log("payload consumed and cleared")
     }
 
     /// Accepts the JSON array the extension writes, and also tolerates the

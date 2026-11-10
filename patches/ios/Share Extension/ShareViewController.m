@@ -931,43 +931,47 @@ static void LANDropTryTypes(NSItemProvider *provider,
     self.hasFinished = YES;
     LANDropLog(@"opening host app: %@", raw);
 
-    // Match flutter_sharing_intent 1.1.1 exactly: call openURL on every
-    // responder that implements it (do not break after the first),
-    // synchronously, then completeRequest. Deferring openURL to a later
-    // runloop turn allowed the extension to be killed before the host
-    // received the URL.
+    NSExtensionContext *context = self.extensionContext;
+    __block BOOL completed = NO;
+    void (^completeOnce)(void) = ^{
+        if (completed) return;
+        completed = YES;
+        [context completeRequestReturningItems:@[] completionHandler:nil];
+    };
+
+    // Preferred path: the extension context asks the system to switch to the
+    // host app. The extension must stay alive until that request is answered,
+    // otherwise the launch is cancelled and the share sheet just closes.
+    if ([context respondsToSelector:@selector(openURL:completionHandler:)]) {
+        [context openURL:url completionHandler:^(BOOL success) {
+            LANDropLog(@"context open finished (success=%d)", success);
+            // Give the system a moment to bring the host app forward before this
+            // process goes away; completing instantly aborts the switch.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), completeOnce);
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), completeOnce);
+        return;
+    }
+
+    // Legacy fallback for systems without the context API: perform the private
+    // openURL: exactly once. Calling it on every responder (what the original
+    // plugin did) issues several launches and they cancel each other out.
     SEL selector = sel_registerName("openURL:");
     UIResponder *responder = self;
-    BOOL handled = NO;
     while (responder) {
         if ([responder respondsToSelector:selector]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [responder performSelector:selector withObject:url];
 #pragma clang diagnostic pop
-            handled = YES;
+            break;
         }
         responder = responder.nextResponder;
     }
-    NSExtensionContext *context = self.extensionContext;
-    if (!handled && [context respondsToSelector:@selector(openURL:completionHandler:)]) {
-        // Newer systems drop the private responder trick; the public context
-        // API is the supported path there. completeRequest runs exactly once.
-        __block BOOL completed = NO;
-        void (^completeOnce)(void) = ^{
-            if (completed) return;
-            completed = YES;
-            [context completeRequestReturningItems:@[] completionHandler:nil];
-        };
-        [context openURL:url completionHandler:^(BOOL success) {
-            LANDropLog(@"NSExtensionContext open finished (success=%d)", success);
-            completeOnce();
-        }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), completeOnce);
-        return;
-    }
-    [context completeRequestReturningItems:@[] completionHandler:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), completeOnce);
 }
 
 - (void)finish:(BOOL)success {
