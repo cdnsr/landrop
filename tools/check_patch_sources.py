@@ -111,12 +111,15 @@ for token in [
     "SharingTimestamp",
     "deliverPending",
     "preferEventSink",
-    "requestForegroundIfNeeded",
     "willEnterForeground",
 ]:
     require(token in plugin, f"host plugin replacement missing: {token}")
 require("didBecomeActive" in plugin,
         "host plugin must retry the handoff when the app becomes active")
+# Opening a URL from inside plugin registration (didFinishLaunching) makes the
+# system terminate the process, which shows up as an instant crash on launch.
+require("UIApplication.shared.open" not in plugin,
+        "host plugin must not request foreground itself during registration")
 # The payload must survive the process that first reads it: the system can spawn
 # Runner for the URL and kill it before Dart ever asks for the share.
 require("func consume()" in plugin,

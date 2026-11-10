@@ -99,28 +99,10 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         registrar.addApplicationDelegate(instance)
 
         // The extension has usually written the payload before the engine
-        // finished booting, so look for it immediately.
+        // finished booting, so look for it immediately. Nothing here may touch
+        // UIKit: this runs inside didFinishLaunching, where asking the system to
+        // open a URL terminates the process.
         instance.deliverPending(preferEventSink: false, reason: "registration")
-        instance.requestForegroundIfNeeded()
-    }
-
-    /// A share can spawn Runner in the background without ever activating it:
-    /// the system creates the process, hands over the URL, and leaves the app
-    /// behind the share sheet. Asking to open our own sharing URL brings the app
-    /// forward the same way a user tap would.
-    private func requestForegroundIfNeeded() {
-        guard UIApplication.shared.applicationState != .active else { return }
-        guard let pending = UserDefaults(suiteName: appGroupId)?.double(forKey: kTimestampKey),
-              pending > 0 else { return }
-
-        let bundleId = Bundle.main.bundleIdentifier ?? kFallbackBundleId
-        guard let url = URL(string: "\(kSchemePrefix)-\(bundleId)://dataUrl=\(kUserDefaultsKey)#media") else {
-            return
-        }
-        log("app not active with a pending share; requesting foreground")
-        UIApplication.shared.open(url, options: [:]) { success in
-            self.log("foreground request finished (success=\(success))")
-        }
     }
 
     // MARK: - Method channel
@@ -229,7 +211,6 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
 
     @objc private func applicationWillEnterForeground() {
         // Coming back from the background: hand over anything still pending.
-        // Do not request the foreground here, the app is already on its way.
         deliverPending(preferEventSink: true, reason: "willEnterForeground")
     }
 
