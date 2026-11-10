@@ -56,6 +56,9 @@ for token in [
     "loadItemForTypeIdentifier",
     "SharingKey", "kSchemePrefix", "SharingFileTypeImage",
     "writeSharedObject", "Library/Preferences", "AppGroupId",
+    "LANDropIsArchivedPlist", "CGImageSourceCreateWithData",
+    "CGImageSourceGetType", "canLoadObjectOfClass",
+    "preferredFilenameExtension", "LANDropImageDataFromItem",
     "dispatch_group_enter", "completeRequestReturningItems",
     "NSFileCoordinator",
 ]:
