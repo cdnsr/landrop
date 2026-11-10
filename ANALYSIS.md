@@ -100,7 +100,11 @@ GitHub Actions 的 macOS runner 没有授权 Apple ID/设备密钥袋，也没�
 
 **扩展自杀得太早。** 全程没有 `didBecomeActive`，说明 App 只是被系统在后台创建并收到 URL（`initial=true`），从未进入前台，所以分享面板一关就回到桌面。原实现沿用插件的写法，对响应链上**每个** responder 都调一次 `openURL:`，然后立刻 `completeRequest`，多次启动请求互相取消。现在改为只调用一次 `NSExtensionContext.openURL:completionHandler:`，并在回调后延迟 0.6 秒（另有 2 秒兜底）才完成请求，给系统时间完成前台切换。
 
-**宿主侧补一次前台请求。** 插件在注册时若发现 App 不是 active 且存在待处理载荷，就主动 `UIApplication.open` 自己的分享 URL，效果等同于用户点了一下图标；`willEnterForeground` 时也会补投递一次。
+**宿主侧补一次前台请求。** ~~插件在注册时若发现 App 不是 active 且存在待处理载荷，就主动 `UIApplication.open` 自己的分享 URL。~~ 这一条在 patch8 中已删除：它运行在 `didFinishLaunchingWithOptions` 内部（插件注册阶段），此时请求系统打开 URL 会让系统直接终止进程，表现就是「一打开就闪退、分享也拉不起来」。而且因为载荷改为不提前删除，每次启动都会检测到待处理载荷、再次自打开、再次崩溃，形成自杀循环。前台切换交给扩展侧完成，宿主不自己打开自己。
+
+## Bug 5：patch7 启动即闪退
+
+patch7 在插件注册阶段调用了 `UIApplication.shared.open`，触发系统终止进程。同一版还把扩展的首选打开方式换成了 `NSExtensionContext.openURL:`，而日志证明此前真正生效的是响应链那次调用，换掉后连分享都拉不起 App。patch8 两处都改回：宿主侧完全移除自打开（`UIApplication` 仅剩生命周期方法签名与通知名），扩展侧恢复为响应链 `openURL:` 只调用一次，再延迟 0.8 秒完成请求。
 
 ## 签名与 entitlements（巨魔专用）
 
