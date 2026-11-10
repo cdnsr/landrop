@@ -63,7 +63,8 @@ GitHub Actions 的 macOS runner 没有授权 Apple ID/设备密钥袋，也没�
 - 类名声明为 `_TtC15Share_Extension19ShareViewController`，与原 NIB 中 `UIClassSwapper` 查找的 Swift mangle 名完全一致，**NIB 保持原样**；早期“替换成长类名 + NUL 补齐”的做法会破坏 NIBArchive 长度前缀编码，已删除。
 - 图片按 `loadFileRepresentation` → `loadInPlaceFileRepresentation` → `loadDataRepresentation` → `loadItem` 四级回退，覆盖 png/jpeg/heic/heif/tiff/gif/webp/public.image；`NSURL`、`UIImage`、`NSData` 都接受。截图场景恰恰是 provider 不肯为 `loadFileRepresentation` 落地临时文件的那种，`loadInPlace` 这一级是为它加的。
 - 截图打上标记后（标注/涂鸦）系统把内容作为**内存 UIImage** 交给扩展，请求文件表示时序列化成 `NSKeyedArchiver` 的 `bplist00` 归档，文件名却还是 `.png`。旧逻辑把归档原样复制过去，宿主拿到的是打不开的“图片”。新增 `LANDropNormalizeImageFileAtURL` 在复制后就地修复：先按签名判断（PNG/JPEG/GIF/TIFF/HEIC/RIFF），不是真图片且是 bplist 时用 `NSKeyedUnarchiver` 还原成 `UIImage`/`NSData` 再重写成 PNG；解档失败则扫描原始字节里的 PNG IEND / JPEG EOI 边界提取图像；仍失败才放弃这一路表示、继续尝试下一种，绝不把不可用的文件交给宿主。整个修复过程 `@try/@catch` 包裹，异常不会终止扩展进程。
-- 复制改为“直接 `copyItem` 优先、`NSFileCoordinator` 兜底”，避免对扩展自己容器内已可读的临时文件做多余协调而失败。
+- 复制顺序与原版一致：`NSFileCoordinator` 优先、直接 `copyItem` 兜底。相册的 security-scoped URL 正是走协调复制这条已经验证可用的路径，顺序不能反过来。
+- 载荷交接只做原版那一次 `UserDefaults(suiteName:)` 写入，**不**绕过 cfprefsd 直接写 App Group 的 `Library/Preferences/<group>.plist`。那个文件归 cfprefsd 管，直写会和它的缓存互相覆盖，宿主读该域时拿不到键，表现就是「App 打开了但什么都没选中」。写入后立刻用宿主同一套 API 回读校验，读不到就判交接失败并写日志，不再假装成功去开 App。
 - 落地文件名只保留 `[A-Za-z0-9._-]`，其余字符替换为 `_`。宿主插件是把 `file://<path>` 直接字符串替换成路径、**不做百分号解码**，截图默认名 `PNG image.png` 这类带空格/中文的名字会让路径失效、图片被静默丢弃。
 - 若某个 provider 第一次取载荷为空（截图标注进程交付较慢），整套流程重试一次再判定失败。
 - 公开 UTI 全不匹配的第三方/私有 provider，改用 `registeredTypeIdentifiers` 兜底，按普通文件交出，而不是直接丢弃。
