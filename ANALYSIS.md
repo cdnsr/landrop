@@ -92,6 +92,16 @@ GitHub Actions 的 macOS runner 没有授权 Apple ID/设备密钥袋，也没�
 - JSON 形状与 `type` 取值（text=0/url=1/image=2/video=3/file=4）保持不变，`value` 的 `file://` 前缀照旧去掉，因为 Dart 侧把它当文件路径用。
 - 宿主侧也写同一份 `landrop-share.log`（带 `[host]` 标记），一次取文件即可看到「写入 → 取到 → 投递」三段。
 
+## Bug 4：分享后 App 闪一下就回桌面，再打开才看到文件
+
+第一版替换实现有两个错误，日志给出了直接证据。
+
+**载荷被过早删除。** 日志里 `registration: held 124 chars` 出现在 PID 1561，而 9 秒后 `getInitialSharing -> nil` 来自 PID 1566——进程换了。原实现在「取到」的那一刻就把 App Group 里的键删掉，于是拉起它的进程一旦被系统回收，数据就永久丢失；用户手动打开时是新进程，自然什么都读不到。现在载荷只在 Dart **真正取走**后才清除（`consume()`），读取阶段不删，并用时间戳做同进程幂等，不会重复投递。
+
+**扩展自杀得太早。** 全程没有 `didBecomeActive`，说明 App 只是被系统在后台创建并收到 URL（`initial=true`），从未进入前台，所以分享面板一关就回到桌面。原实现沿用插件的写法，对响应链上**每个** responder 都调一次 `openURL:`，然后立刻 `completeRequest`，多次启动请求互相取消。现在改为只调用一次 `NSExtensionContext.openURL:completionHandler:`，并在回调后延迟 0.6 秒（另有 2 秒兜底）才完成请求，给系统时间完成前台切换。
+
+**宿主侧补一次前台请求。** 插件在注册时若发现 App 不是 active 且存在待处理载荷，就主动 `UIApplication.open` 自己的分享 URL，效果等同于用户点了一下图标；`willEnterForeground` 时也会补投递一次。
+
 ## 签名与 entitlements（巨魔专用）
 
 TrollStore 2.x 会：从每个 Mach-O 的 `LC_CODE_SIGNATURE` dump entitlements → 用 `ldid` 递归 ad-hoc 伪造签名 → 对所有 Mach-O 应用 CoreTrust bypass → 注册 App Group 容器与 PlugIns。它**不会**读取 bundle 里另放的 `entitlements.plist`，也不会展开 Xcode 变量 `$(AppIdentifierPrefix)`。完全不签名会导致 app 与 appex 拿不到共享 App Group。
