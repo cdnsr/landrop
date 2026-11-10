@@ -69,7 +69,7 @@ python3 "$ROOT/tools/patch_bluetooth_plugins.py" "$BUILD"
   -fobjc-arc -fmodules -O2 \
   -I "$ROOT/patches/ios/Share Extension" \
   -framework Foundation -framework UIKit -framework MobileCoreServices \
-  -framework UniformTypeIdentifiers -framework ImageIO \
+  -framework UniformTypeIdentifiers \
   -Wl,-e,_NSExtensionMain \
   "$ROOT/patches/ios/Share Extension/ShareViewController.m" \
   "$ROOT/patches/ios/Share Extension/main.m" \

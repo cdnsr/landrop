@@ -1,6 +1,6 @@
 # LANDrop iOS 2.8.2 修复分析（TrollStore 版）
 
-本目录保存对 `LANDrop-2.8.2.ipa` 的逆向证据、两个 bug 的修复以及远程编译验证流程。原 Flutter/Dart 业务源码没有公开，IPA 里只有已编译的 AOT 快照，因此修复以“原生二进制补丁 + 原 AOT/资源”为目标，输出供 TrollStore 2.x 安装的 IPA。用户明确要求：**不需要开发者证书、不需要 provisioning profile、不推送 GitHub**。
+本目录保存对 `LANDrop-2.8.2.ipa` 的逆向证据、两个 bug 的修复以及远程编译验证流程。原 Flutter/Dart 业务源码没有公开，IPA 里只有已编译的 AOT 快照，因此修复以“原生二进制补丁 + 原 AOT/资源”为目标，输出供 TrollStore 2.x 安装的 IPA。约束：**不需要开发者证书、不需要 provisioning profile，由 GitHub Actions 编译产出**。
 
 ## 从原 IPA 确认的事实
 
@@ -61,9 +61,14 @@ GitHub Actions 的 macOS runner 没有授权 Apple ID/设备密钥袋，也没�
 新实现是纯 Objective-C 的 `patches/ios/Share Extension/ShareViewController.m`：
 
 - 类名声明为 `_TtC15Share_Extension19ShareViewController`，与原 NIB 中 `UIClassSwapper` 查找的 Swift mangle 名完全一致，**NIB 保持原样**；早期“替换成长类名 + NUL 补齐”的做法会破坏 NIBArchive 长度前缀编码，已删除。
-- 图片按 `loadFileRepresentation` → `loadDataRepresentation` → `loadItem` 三级回退，覆盖 png/jpeg/heic/heif/tiff/gif/public.image；`NSURL`、`UIImage`、`NSData` 都接受。
+- 图片按 `loadFileRepresentation` → `loadInPlaceFileRepresentation` → `loadDataRepresentation` → `loadItem` 四级回退，覆盖 png/jpeg/heic/heif/tiff/gif/webp/public.image；`NSURL`、`UIImage`、`NSData` 都接受。截图场景恰恰是 provider 不肯为 `loadFileRepresentation` 落地临时文件的那种，`loadInPlace` 这一级是为它加的。
+- 截图打上标记后（标注/涂鸦）系统把内容作为**内存 UIImage** 交给扩展，请求文件表示时序列化成 `NSKeyedArchiver` 的 `bplist00` 归档，文件名却还是 `.png`。旧逻辑把归档原样复制过去，宿主拿到的是打不开的“图片”。新增 `LANDropNormalizeImageFileAtURL` 在复制后就地修复：先按签名判断（PNG/JPEG/GIF/TIFF/HEIC/RIFF），不是真图片且是 bplist 时用 `NSKeyedUnarchiver` 还原成 `UIImage`/`NSData` 再重写成 PNG；解档失败则扫描原始字节里的 PNG IEND / JPEG EOI 边界提取图像；仍失败才放弃这一路表示、继续尝试下一种，绝不把不可用的文件交给宿主。整个修复过程 `@try/@catch` 包裹，异常不会终止扩展进程。
+- 复制改为“直接 `copyItem` 优先、`NSFileCoordinator` 兜底”，避免对扩展自己容器内已可读的临时文件做多余协调而失败。
+- 若某个 provider 第一次取载荷为空（截图标注进程交付较慢），整套流程重试一次再判定失败。
+- 公开 UTI 全不匹配的第三方/私有 provider，改用 `registeredTypeIdentifiers` 兜底，按普通文件交出，而不是直接丢弃。
 - 视频和普通文件同样尝试文件/数据/旧 item 三种 representation，并在 completion 内立刻复制进 App Group，避免临时文件失效。
 - `DispatchGroup` 等待全部附件，`NSLock` 保护共享数组，`completeRequest` / `cancelRequest` 只执行一次。
+- 诊断日志写到 App Group 内 `Library/Logs/landrop-share.log`（上限 64 KB），免越狱可用文件管理器直接查看，现场失败可定位到具体是哪种表示、哪一步出错。
 - JSON 继续是 `[{"value":..., "thumbnail":..., "duration":..., "type":Int}]`，`type` 严格保持 `text=0, url=1, image=2, video=3, file=4`；写入 `UserDefaults(suiteName:)` 的 `SharingKey`。
 - 宿主 URL 仍是 `SharingMedia-app.landrop.landrop-flutter://dataUrl=SharingKey#media`（或 `#text/#url`），与已编译的 `flutter_sharing_intent` 和 Dart AOT 完全兼容。
 - `main.m` 引用 Foundation 的 `NSExtensionMain`，链接器用 `-Wl,-e,_NSExtensionMain` 设置入口；纯 ObjC 避免 Swift ABI/兼容库问题。
@@ -87,7 +92,7 @@ TrollStore 2.x 会：从每个 Mach-O 的 `LC_CODE_SIGNATURE` dump entitlements 
 
 执行顺序是：代码先进入默认分支让 GitHub 注册工作流 → 创建并推送真实 Git tag → 用个人 Token 创建同 tag 的草稿 Release 并上传 IPA → 在 Actions 的 “Use workflow from” 选择该 tag 运行。工作流本身已在该 tag 的提交树中，checkout 为正常的 detached HEAD。
 
-缓存键包含 tag、commit、补丁/脚本/工具源码哈希；重复运行同一个 tag 可复用已下载的 IPA 与 Xcode 工具缓存，避免每次从头下载/编译。工作流依次执行静态检查、从草稿 Release 下载并校验 IPA、macOS `clang` 编译、IPA 结构验证、上传 Artifact。草稿 Release 不会自动触发发布事件；没有 `push` 触发；本轮按你要求主动发布 tag/草稿并触发，不把 Token 或 IPA 提交进仓库。
+缓存键包含 tag、commit、补丁/脚本/工具源码哈希；重复运行同一个 tag 可复用已下载的 IPA 与 Xcode 工具缓存，避免每次从头下载/编译。工作流依次执行静态检查、从草稿 Release 下载并校验 IPA、macOS `clang` 编译、IPA 结构验证、上传 Artifact。草稿 Release 不会自动触发发布事件；没有 `push` 触发。
 
 CI 的“通过”只代表静态结构、补丁字节、entitlements、无加密页等检查通过。蓝牙弹窗与系统截图分享仍需 TrollStore 真机验证。
 
@@ -95,8 +100,9 @@ CI 的“通过”只代表静态结构、补丁字节、entitlements、无加�
 
 1. TrollStore 安装不出现 180；若出现 184，说明输入 decrypted IPA 中仍有其他加密嵌套二进制。
 2. 关闭蓝牙后冷启动 LANDrop，不出现「打开蓝牙」系统提示；LAN 发现等原有功能正常。
-3. 截图预览 → 分享 → LANDrop，应进入发送流程；相册图片/视频、Files 的 PNG/JPEG/HEIC 分享无回归。
+3. 截图预览 → 分享 → LANDrop，应进入发送流程并自动选中该截图；相册图片/视频、Files 的 PNG/JPEG/HEIC 分享无回归。
 4. 若宿主 App 打不开，先检查 App Group `group.app.landrop.landrop-flutter` 是否同时出现在 Runner 和 Share Extension 的签名 entitlements 中。
+5. 若截图分享仍失败，App Group 内的 `Library/Logs/landrop-share.log` 记录了每个 provider 走了哪种表示、复制与图片规范化结果，以及宿主 URL 是否发出。
 
 ## 来源与边界
 

@@ -56,18 +56,28 @@ for token in [
     "loadItemForTypeIdentifier",
     "SharingKey", "kSchemePrefix", "SharingFileTypeImage",
     "writeSharedObject", "Library/Preferences", "AppGroupId",
-    "LANDropRepairArchivedPNGAtURL", "NSKeyedUnarchiver", "bplist00",
+    "LANDropNormalizeImageFileAtURL", "LANDropImageDataFromArchive",
+    "LANDropDataLooksLikeImage", "NSKeyedUnarchiver", "bplist00",
+    "loadInPlaceFileRepresentationForTypeIdentifier",
+    "registeredTypeIdentifiers", "NSExtensionContext (LANDropOpenURL)",
     "@catch (__unused NSException *exception)",
     "dispatch_group_enter", "completeRequestReturningItems",
-    "NSFileCoordinator",
+    "NSFileCoordinator", "LANDropCoordinatedCopyItemAtURL",
 ]:
     require(token in share, f"Share extension missing: {token}")
 # The known-good load/copy path must stay intact: no storeImageURL wrapper,
 # no canLoadObjectOfClass, no ImageIO gate before the file is copied.
 for forbidden in ["storeImageURL", "canLoadObjectOfClass",
-                  "CGImageSourceCreateWithData", "LANDropRepairScreenshotData"]:
+                  "CGImageSourceCreateWithData", "LANDropRepairScreenshotData",
+                  "#import <ImageIO/ImageIO.h>"]:
     require(forbidden not in share,
             f"Share extension must not contain regression-prone helper: {forbidden}")
+# Screenshots arrive as UIImage / NSKeyedArchiver payloads. Dropping them or
+# bailing out before the fallbacks run is exactly the reported bug.
+require("UIImagePNGRepresentation" in share,
+        "Share extension must convert UIImage screenshot payloads to PNG")
+require("cancelRequestWithError" in share,
+        "Share extension must still cancel cleanly when nothing is shareable")
 require(share.count("{") == share.count("}"), "Share extension has unbalanced braces")
 
 nib = text("tools/check_share_nib.py")

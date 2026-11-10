@@ -1,13 +1,18 @@
 //  ShareViewController.m
 //  Share Extension replacement for LANDrop 2.8.2 / flutter_sharing_intent 1.1.1.
 //
-//  The original Swift extension only accepted `public.image` via loadItem and
-//  force-cast the result to NSURL. Screenshot providers commonly return
-//  UIImage/NSData or concrete UTIs, so the cast fails and the extension closes
-//  immediately ("flashes"). This implementation tries file, data and legacy
-//  item representations in order, copies payloads into the App Group inside
-//  the callback, then writes the exact legacy JSON / UserDefaults / URL scheme
-//  expected by the already compiled host plugin.
+//  The original Swift extension only asked for `public.image` through
+//  `loadItem` and force-cast the result to NSURL. Photos hands back a file URL,
+//  but the screenshot markup editor hands back an in-memory UIImage (or a
+//  NSKeyedArchiver archive of one), so the cast failed, the extension raised
+//  its "Error loading data" alert for a single frame and dismissed itself: the
+//  share sheet flashed and nothing was ever sent.
+//
+//  This implementation tries file, data and legacy item representations in
+//  order for every provider, repairs archive-shaped screenshot payloads into
+//  real PNG bytes, copies payloads into the App Group inside the callback,
+//  then writes the exact legacy JSON / UserDefaults / URL scheme expected by
+//  the already compiled host plugin.
 //
 //  Pure Objective-C avoids Swift ABI / compatibility-library mismatches. The
 //  runtime class name matches the original NIB's UIClassSwapper string.
@@ -15,12 +20,53 @@
 #import "ShareExtension.h"
 #import <MobileCoreServices/MobileCoreServices.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#import <ImageIO/ImageIO.h>
+#import <stdarg.h>
+#import <string.h>
 
 static NSString * const kSchemePrefix = @"SharingMedia";
 static NSString * const kUserDefaultsKey = @"SharingKey";
 static NSString * const kAppGroupIdKey = @"AppGroupId";
 static NSString * const kFallbackHostBundleId = @"app.landrop.landrop-flutter";
+static NSString * const kLogFileName = @"landrop-share.log";
+
+static NSString *gAppGroupId = nil;
+
+#pragma mark - Diagnostics
+
+// The extension can be terminated without a visible error, so every interesting
+// decision is also appended to a small bounded log inside the App Group. That
+// file is readable from Filza / any file manager without a jailbreak, which is
+// what makes a field failure diagnosable at all.
+static void LANDropLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+
+static void LANDropLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"[LANDropShare] %@", message);
+
+    @try {
+        if (gAppGroupId.length == 0) return;
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSURL *container = [fm containerURLForSecurityApplicationGroupIdentifier:gAppGroupId];
+        if (!container) return;
+        NSURL *dir = [container URLByAppendingPathComponent:@"Library/Logs" isDirectory:YES];
+        [fm createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+        NSURL *file = [dir URLByAppendingPathComponent:kLogFileName];
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], message];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:file.path];
+        if (!handle || [handle seekToEndOfFile] > 64 * 1024) {
+            [handle closeFile];
+            [line writeToURL:file atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            return;
+        }
+        [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [handle closeFile];
+    } @catch (__unused NSException *exception) {
+        // Logging must never take the extension down with it.
+    }
+}
 
 #pragma mark - Type identifiers
 
@@ -68,7 +114,7 @@ static NSString *LANDropUTTypeItem(void) {
 static NSArray<NSString *> *LANDropImageTypes(void) {
     return @[LANDropUTTypePNG(), LANDropUTTypeJPEG(),
              @"public.heic", @"public.heif", @"public.tiff", @"public.gif",
-             LANDropUTTypeImage()];
+             @"public.webp", LANDropUTTypeImage()];
 }
 static NSArray<NSString *> *LANDropMovieTypes(void) {
     return @[LANDropUTTypeMovie(), @"public.mpeg-4", @"public.quicktime-movie"];
@@ -83,51 +129,174 @@ static NSString *LANDropExtensionForType(NSString *uti, NSString *fallback) {
     if ([uti isEqualToString:@"public.heic"] || [uti isEqualToString:@"public.heif"]) return @"heic";
     if ([uti isEqualToString:@"public.tiff"]) return @"tiff";
     if ([uti isEqualToString:@"public.gif"]) return @"gif";
+    if ([uti isEqualToString:@"public.webp"]) return @"webp";
     if ([uti isEqualToString:LANDropUTTypeMovie()] ||
         [uti isEqualToString:@"public.quicktime-movie"]) return @"mov";
     if ([uti isEqualToString:@"public.mpeg-4"]) return @"mp4";
     return fallback;
 }
 
-#pragma mark - Post-copy screenshot archive repair
+#pragma mark - Image payload normalisation
 
-// Screenshot markup can register an in-memory UIImage as public.png, so the
-// copied file is a bplist00 NSKeyedArchiver archive with a .png name. Repair
-// it in place AFTER the copy succeeded. NSKeyedUnarchiver can raise an
-// Objective-C exception for malformed archives or missing classes, and an
-// uncaught exception terminates the extension process (the host would then
-// open with an empty attachment list). Everything here is wrapped so a
-// failure leaves the original file untouched and never aborts the extension.
-static void LANDropRepairArchivedPNGAtURL(NSURL *url) {
+// True when the bytes start with a signature the receiving app can actually
+// open. Used to reject archive blobs that merely carry an image file name.
+static BOOL LANDropDataLooksLikeImage(NSData *data) {
+    if (data.length < 12) return NO;
+    const unsigned char *b = data.bytes;
+    if (b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return YES;
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return YES;
+    if (b[0] == 'G' && b[1] == 'I' && b[2] == 'F' && b[3] == '8') return YES;
+    if (b[0] == 'I' && b[1] == 'I' && b[2] == 0x2A && b[3] == 0x00) return YES;
+    if (b[0] == 'M' && b[1] == 'M' && b[2] == 0x00 && b[3] == 0x2A) return YES;
+    if (b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p') return YES;
+    if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F') return YES;
+    return NO;
+}
+
+// Screenshot markup registers an in-memory UIImage as `public.png`, and the
+// system then serialises that object into an NSKeyedArchiver bplist when a file
+// representation is requested. Depending on the iOS build the archive contains
+// the PNG data outright or only a UIImage wrapper. Both shapes are handled:
+// first a real unarchive, then a signature scan of the raw archive bytes.
+static NSData *LANDropImageDataFromArchive(NSData *data) {
+    id object = nil;
+    @try {
+        NSSet *classes = [NSSet setWithObjects:
+                          UIImage.class, NSData.class, NSMutableData.class,
+                          NSURL.class, NSString.class, NSNumber.class,
+                          NSArray.class, NSMutableArray.class,
+                          NSDictionary.class, NSMutableDictionary.class,
+                          NSUUID.class, NSDate.class, nil];
+        object = [NSKeyedUnarchiver unarchivedObjectOfClasses:classes
+                                                     fromData:data error:NULL];
+    } @catch (__unused NSException *exception) {
+        object = nil;
+    }
+
+    if ([object isKindOfClass:UIImage.class]) {
+        NSData *png = UIImagePNGRepresentation((UIImage *)object);
+        if (png.length > 0) return png;
+    }
+    if ([object isKindOfClass:NSData.class] &&
+        LANDropDataLooksLikeImage((NSData *)object)) {
+        return (NSData *)object;
+    }
+    if ([object isKindOfClass:NSArray.class]) {
+        for (id element in (NSArray *)object) {
+            if ([element isKindOfClass:UIImage.class]) {
+                NSData *png = UIImagePNGRepresentation((UIImage *)element);
+                if (png.length > 0) return png;
+            }
+            if ([element isKindOfClass:NSData.class] &&
+                LANDropDataLooksLikeImage((NSData *)element)) {
+                return (NSData *)element;
+            }
+        }
+    }
+
+    const unsigned char *b = data.bytes;
+    NSUInteger n = data.length;
+    static const unsigned char pngSignature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    for (NSUInteger i = 0; i + 8 < n; i++) {
+        if (memcmp(b + i, pngSignature, 8) != 0) continue;
+        for (NSUInteger j = i + 8; j + 4 <= n; j++) {
+            if (memcmp(b + j, "IEND", 4) != 0) continue;
+            NSUInteger end = MIN(j + 8, n);
+            return [data subdataWithRange:NSMakeRange(i, end - i)];
+        }
+        return [data subdataWithRange:NSMakeRange(i, n - i)];
+    }
+    for (NSUInteger i = 0; i + 3 < n; i++) {
+        if (!(b[i] == 0xFF && b[i + 1] == 0xD8 && b[i + 2] == 0xFF)) continue;
+        for (NSUInteger j = n; j > i + 4; j--) {
+            if (b[j - 2] == 0xFF && b[j - 1] == 0xD9) {
+                return [data subdataWithRange:NSMakeRange(i, j - i)];
+            }
+        }
+        return [data subdataWithRange:NSMakeRange(i, n - i)];
+    }
+    return nil;
+}
+
+// Repair the copied file in place. Every step is exception guarded: an
+// uncaught Objective-C exception terminates the extension process, and the
+// host app would then open with an empty attachment list.
+//
+// Returns YES when the file is worth handing to the host app. Unknown bytes are
+// kept (the receiving side may still understand them), but an archive that
+// cannot be turned back into image data is rejected so the caller can try the
+// next representation instead of sending an unopenable file.
+static BOOL LANDropNormalizeImageFileAtURL(NSURL *url) {
     @try {
         NSData *data = [NSData dataWithContentsOfURL:url];
-        if (data.length < 8 || memcmp(data.bytes, "bplist00", 8) != 0) return;
-
-        id object = nil;
-        @try {
-            object = [NSKeyedUnarchiver unarchivedObjectOfClasses:
-                      [NSSet setWithObjects:UIImage.class, NSData.class, NSURL.class,
-                       NSString.class, NSNumber.class, NSArray.class,
-                       NSDictionary.class, nil]
-                      fromData:data error:NULL];
-        } @catch (__unused NSException *exception) {
-            object = nil;
+        if (data.length == 0) return NO;
+        if (LANDropDataLooksLikeImage(data)) return YES;
+        if (data.length < 8 || memcmp(data.bytes, "bplist00", 8) != 0) {
+            LANDropLog(@"unrecognised image payload kept as-is (%lu bytes)",
+                       (unsigned long)data.length);
+            return YES;
         }
 
-        UIImage *image = nil;
-        if ([object isKindOfClass:UIImage.class]) {
-            image = (UIImage *)object;
-        } else if ([object isKindOfClass:NSData.class]) {
-            image = [UIImage imageWithData:(NSData *)object];
+        NSData *image = LANDropImageDataFromArchive(data);
+        if (image.length == 0) {
+            LANDropLog(@"archive payload had no extractable image");
+            return NO;
         }
-        NSData *png = image ? UIImagePNGRepresentation(image) : nil;
-        if (png.length > 0) [png writeToURL:url options:NSDataWritingAtomic error:NULL];
+        if (![image writeToURL:url options:NSDataWritingAtomic error:NULL]) {
+            LANDropLog(@"could not write normalised image bytes");
+            return NO;
+        }
+        LANDropLog(@"normalised archived screenshot payload (%lu -> %lu bytes)",
+                   (unsigned long)data.length, (unsigned long)image.length);
+        return YES;
     } @catch (__unused NSException *exception) {
-        // Keep the copied file as-is; never propagate into the extension.
+        LANDropLog(@"image normalisation raised %@", exception.name);
+        return NO;
     }
 }
 
+#pragma mark - File copying
+
+// Plain copy first: most providers hand back a readable file in the
+// extension's own container, where NSFileCoordinator only adds a failure mode.
+// Coordination stays as a fallback for provider-hosted URLs.
+static BOOL LANDropCopyItemAtURL(NSURL *source, NSURL *destination) {
+    if (!source.isFileURL || !destination) return NO;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm removeItemAtURL:destination error:NULL];
+    NSError *error = nil;
+    if ([fm copyItemAtURL:source toURL:destination error:&error]) return YES;
+    LANDropLog(@"direct copy failed (%@): %@", source.lastPathComponent,
+               error.localizedDescription);
+    return NO;
+}
+
+static BOOL LANDropCoordinatedCopyItemAtURL(NSURL *source, NSURL *destination) {
+    if (!source.isFileURL || !destination) return NO;
+    __block BOOL copied = NO;
+    NSFileCoordinator *coordinator = [NSFileCoordinator new];
+    NSError *coordinationError = nil;
+    [coordinator coordinateReadingItemAtURL:source options:NSFileCoordinatorReadingWithoutChanges
+                                       error:&coordinationError
+                                  byAccessor:^(NSURL *coordinated) {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        [fm removeItemAtURL:destination error:NULL];
+        copied = [fm copyItemAtURL:coordinated toURL:destination error:NULL];
+    }];
+    if (!copied) {
+        LANDropLog(@"coordinated copy failed (%@): %@", source.lastPathComponent,
+                   coordinationError.localizedDescription);
+    }
+    return copied;
+}
+
 #pragma mark - Thread-safe completion
+
+// Private but long-standing on NSExtensionContext; used only when the legacy
+// responder-chain openURL: is unavailable.
+@interface NSExtensionContext (LANDropOpenURL)
+- (void)openURL:(NSURL *)URL completionHandler:(void (^)(BOOL success))completionHandler;
+@end
 
 typedef void (^LANDropProviderBlock)(NSItemProvider *provider, NSArray<NSString *> *types,
                                      NSUInteger index, SharingFileType fileType,
@@ -170,6 +339,9 @@ static void LANDropTryTypes(NSItemProvider *provider,
 @property (nonatomic, strong) NSMutableArray<NSString *> *texts;
 @property (nonatomic, strong) NSLock *lock;
 @property (nonatomic, copy) NSString *fragment;
+- (void)addMedia:(NSDictionary *)file;
+- (void)addText:(NSString *)text fragment:(NSString *)fragment;
+- (BOOL)isEmpty;
 @end
 
 @implementation LANDropShareState
@@ -193,6 +365,12 @@ static void LANDropTryTypes(NSItemProvider *provider,
     if (_media.count > 0) _fragment = @"media";
     else _fragment = fragment;
     [_lock unlock];
+}
+- (BOOL)isEmpty {
+    [_lock lock];
+    BOOL empty = (_media.count == 0 && _texts.count == 0);
+    [_lock unlock];
+    return empty;
 }
 @end
 
@@ -236,6 +414,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
     } else {
         self.appGroupId = [@"group." stringByAppendingString:self.hostAppBundleIdentifier];
     }
+    gAppGroupId = self.appGroupId;
 }
 
 #pragma mark - Attachment routing
@@ -248,11 +427,21 @@ static void LANDropTryTypes(NSItemProvider *provider,
             if ([provider isKindOfClass:NSItemProvider.class]) [providers addObject:provider];
         }
     }
+    LANDropLog(@"extension started: %lu provider(s), group=%@ container=%@",
+               (unsigned long)providers.count, self.appGroupId,
+               ([self containerURL] ? @"ok" : @"missing"));
     if (providers.count == 0) {
         [self finish:NO];
         return;
     }
+    [self loadProviders:providers attempt:1];
+}
 
+// Screenshot-sourced providers occasionally fail their first representation
+// load (the payload is still being handed over by the markup process) and
+// succeed on a second attempt. One retry is cheap insurance against a share
+// sheet that silently closes.
+- (void)loadProviders:(NSArray<NSItemProvider *> *)providers attempt:(NSUInteger)attempt {
     dispatch_group_t group = dispatch_group_create();
     for (NSItemProvider *provider in providers) {
         dispatch_group_enter(group);
@@ -262,7 +451,17 @@ static void LANDropTryTypes(NSItemProvider *provider,
     }
     __weak typeof(self) weakSelf = self;
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        [weakSelf saveAndRedirect];
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if ([self.state isEmpty] && attempt < 2) {
+            LANDropLog(@"attempt %lu produced no payload; retrying", (unsigned long)attempt);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self loadProviders:providers attempt:attempt + 1];
+            });
+            return;
+        }
+        [self saveAndRedirect];
     });
 }
 
@@ -271,6 +470,9 @@ static void LANDropTryTypes(NSItemProvider *provider,
     void (^finish)(BOOL) = ^(BOOL success) {
         if (done) return;
         done = YES;
+        if (!success) {
+            LANDropLog(@"provider gave up: %@", provider.registeredTypeIdentifiers);
+        }
         completion();
     };
 
@@ -311,6 +513,21 @@ static void LANDropTryTypes(NSItemProvider *provider,
         [self loadTextProvider:provider types:texts fragment:@"text" completion:finish];
         return;
     }
+
+    // Vendor-specific or private identifiers (screenshot services, third-party
+    // apps) match none of the public types above. Load whatever the provider
+    // does advertise and hand it over as a generic file instead of dropping it.
+    NSMutableArray<NSString *> *registered = [NSMutableArray array];
+    for (id identifier in provider.registeredTypeIdentifiers) {
+        if ([identifier isKindOfClass:NSString.class]) [registered addObject:identifier];
+    }
+    if (registered.count > 0) {
+        LANDropLog(@"falling back to registered identifiers: %@", registered);
+        [self loadBinaryProvider:provider types:registered
+                        fileType:SharingFileTypeFile defaultExtension:@"bin"
+                      completion:finish];
+        return;
+    }
     finish(NO);
 }
 
@@ -326,6 +543,39 @@ static void LANDropTryTypes(NSItemProvider *provider,
         NSString *type = all[index];
         if ([p respondsToSelector:@selector(loadFileRepresentationForTypeIdentifier:completionHandler:)]) {
             [p loadFileRepresentationForTypeIdentifier:type completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self || error || !url) { next(NO); return; }
+                NSDictionary *stored = [self storeURL:url type:SharingFileTypeImage
+                                     defaultExtension:LANDropExtensionForType(type, @"png")];
+                if (stored) { [self.state addMedia:stored]; next(YES); }
+                else next(NO);
+            }];
+            return;
+        }
+        next(NO);
+    };
+    LANDropTryTypes(provider, types, 0, SharingFileTypeImage, @"png", attempt,
+                    ^(BOOL success) {
+        if (success) { completion(YES); return; }
+        [weakSelf loadImageInPlace:provider types:types completion:completion];
+    });
+}
+
+// Screenshot and markup providers hand the bytes over in place: the URL is
+// only readable inside the callback and must be copied immediately. Providers
+// that refuse to materialise a temporary file for `loadFileRepresentation`
+// (which is exactly the screenshot case) still support this one.
+- (void)loadImageInPlace:(NSItemProvider *)provider
+                   types:(NSArray<NSString *> *)types
+              completion:(void (^)(BOOL))completion {
+    __weak typeof(self) weakSelf = self;
+    LANDropProviderBlock attempt = ^(NSItemProvider *p, NSArray<NSString *> *all,
+                                     NSUInteger index, SharingFileType fileType,
+                                     NSString *ext, void (^next)(BOOL)) {
+        NSString *type = all[index];
+        if ([p respondsToSelector:@selector(loadInPlaceFileRepresentationForTypeIdentifier:completionHandler:)]) {
+            [p loadInPlaceFileRepresentationForTypeIdentifier:type
+                                            completionHandler:^(NSURL * _Nullable url, BOOL isInPlace, NSError * _Nullable error) {
                 __strong typeof(weakSelf) self = weakSelf;
                 if (!self || error || !url) { next(NO); return; }
                 NSDictionary *stored = [self storeURL:url type:SharingFileTypeImage
@@ -482,6 +732,9 @@ static void LANDropTryTypes(NSItemProvider *provider,
             NSDictionary *stored = nil;
             if ([item isKindOfClass:NSURL.class]) {
                 stored = [self storeURL:(NSURL *)item type:type defaultExtension:ext];
+            } else if ([item isKindOfClass:UIImage.class]) {
+                NSData *data = UIImagePNGRepresentation((UIImage *)item);
+                if (data) stored = [self storeData:data type:type defaultExtension:@"png"];
             } else if ([item isKindOfClass:NSData.class]) {
                 stored = [self storeData:(NSData *)item type:type defaultExtension:ext];
             } else if ([item isKindOfClass:NSString.class] &&
@@ -544,7 +797,13 @@ static void LANDropTryTypes(NSItemProvider *provider,
 }
 
 - (NSDictionary *)storedFileAt:(NSURL *)destination type:(SharingFileType)type {
-    LANDropRepairArchivedPNGAtURL(destination);
+    BOOL isImage = (type == SharingFileTypeImage);
+    if (isImage && !LANDropNormalizeImageFileAtURL(destination)) {
+        // A file with an image name but unreadable bytes would be handed to the
+        // host app as a broken image, so try the next representation instead.
+        [NSFileManager.defaultManager removeItemAtURL:destination error:NULL];
+        return nil;
+    }
     // Match Swift JSONEncoder's output for the host plugin's Codable model:
     // required keys only; optional nil fields are omitted, not NSNull.
     // Swift `decodeIfPresent` treats an explicit NSNull as an invalid type for
@@ -557,25 +816,16 @@ static void LANDropTryTypes(NSItemProvider *provider,
                       type:(SharingFileType)type
           defaultExtension:(NSString *)defaultExtension {
     NSURL *container = [self containerURL];
-    if (!container) return nil;
+    if (!container || !url) return nil;
     NSURL *destination = [container
         URLByAppendingPathComponent:[self uniqueName:url.absoluteString
                                     defaultExtension:defaultExtension]];
 
     BOOL accessed = url.isFileURL && [url startAccessingSecurityScopedResource];
-    __block BOOL copied = NO;
-    NSFileCoordinator *coordinator = [NSFileCoordinator new];
-    NSError *coordinationError = nil;
-    [coordinator coordinateReadingItemAtURL:url options:NSFileCoordinatorReadingWithoutChanges
-                                       error:&coordinationError
-                                  byAccessor:^(NSURL *source) {
-        NSError *error = nil;
-        NSFileManager *fm = NSFileManager.defaultManager;
-        if ([fm fileExistsAtPath:destination.path]) [fm removeItemAtURL:destination error:&error];
-        if (!error) copied = [fm copyItemAtURL:source toURL:destination error:&error];
-    }];
+    BOOL copied = LANDropCopyItemAtURL(url, destination);
+    if (!copied) copied = LANDropCoordinatedCopyItemAtURL(url, destination);
     if (accessed) [url stopAccessingSecurityScopedResource];
-    if (coordinationError || !copied) return nil;
+    if (!copied) return nil;
     return [self storedFileAt:destination type:type];
 }
 
@@ -642,9 +892,12 @@ static void LANDropTryTypes(NSItemProvider *provider,
             [self writeSharedObject:json forKey:kUserDefaultsKey];
             succeeded = YES;
         }
+        LANDropLog(@"handing off %lu media item(s), %lu byte(s) of JSON",
+                   (unsigned long)media.count, (unsigned long)json.length);
     } else if (texts.count > 0) {
         [self writeSharedObject:texts forKey:kUserDefaultsKey];
         succeeded = YES;
+        LANDropLog(@"handing off %lu text item(s)", (unsigned long)texts.count);
     }
 
     if (succeeded) [self openHostAppFragment:fragment];
@@ -663,22 +916,45 @@ static void LANDropTryTypes(NSItemProvider *provider,
     if (!url) { [self finish:NO]; return; }
 
     self.hasFinished = YES;
+    LANDropLog(@"opening host app: %@", raw);
+
     // Match flutter_sharing_intent 1.1.1 exactly: call openURL on every
-    // responder that implements it (do not break after the first), synchronously,
-    // then completeRequest. Deferring openURL to a later runloop turn allowed
-    // the extension to be killed before the host received the URL.
+    // responder that implements it (do not break after the first),
+    // synchronously, then completeRequest. Deferring openURL to a later
+    // runloop turn allowed the extension to be killed before the host
+    // received the URL.
     SEL selector = sel_registerName("openURL:");
     UIResponder *responder = self;
+    BOOL handled = NO;
     while (responder) {
         if ([responder respondsToSelector:selector]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [responder performSelector:selector withObject:url];
 #pragma clang diagnostic pop
+            handled = YES;
         }
         responder = responder.nextResponder;
     }
-    [self.extensionContext completeRequestReturningItems:@[] completionHandler:nil];
+    NSExtensionContext *context = self.extensionContext;
+    if (!handled && [context respondsToSelector:@selector(openURL:completionHandler:)]) {
+        // Newer systems drop the private responder trick; the public context
+        // API is the supported path there. completeRequest runs exactly once.
+        __block BOOL completed = NO;
+        void (^completeOnce)(void) = ^{
+            if (completed) return;
+            completed = YES;
+            [context completeRequestReturningItems:@[] completionHandler:nil];
+        };
+        [context openURL:url completionHandler:^(BOOL success) {
+            LANDropLog(@"NSExtensionContext open finished (success=%d)", success);
+            completeOnce();
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), completeOnce);
+        return;
+    }
+    [context completeRequestReturningItems:@[] completionHandler:nil];
 }
 
 - (void)finish:(BOOL)success {
@@ -691,6 +967,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
         if (success) {
             [self.extensionContext completeRequestReturningItems:@[] completionHandler:nil];
         } else {
+            LANDropLog(@"no shareable content; cancelling request");
             NSError *error = [NSError errorWithDomain:@"app.landrop.share-extension"
                                                  code:-1
                                              userInfo:@{NSLocalizedDescriptionKey:
