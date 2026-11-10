@@ -25,6 +25,7 @@
 
 static NSString * const kSchemePrefix = @"SharingMedia";
 static NSString * const kUserDefaultsKey = @"SharingKey";
+static NSString * const kTimestampKey = @"SharingTimestamp";
 static NSString * const kAppGroupIdKey = @"AppGroupId";
 static NSString * const kFallbackHostBundleId = @"app.landrop.landrop-flutter";
 static NSString * const kLogFileName = @"landrop-share.log";
@@ -867,6 +868,9 @@ static void LANDropTryTypes(NSItemProvider *provider,
         return NO;
     }
     [defaults setObject:value forKey:key];
+    // The host plugin reads this timestamp to tell a fresh share from a stale
+    // one, so it can consume the payload exactly once.
+    [defaults setDouble:NSDate.date.timeIntervalSince1970 forKey:kTimestampKey];
     [defaults synchronize];
 
     // Read back through the same API the host plugin uses, so a broken handoff
@@ -909,7 +913,6 @@ static void LANDropTryTypes(NSItemProvider *provider,
         LANDropLog(@"handing off %lu text item(s) (stored=%d)",
                    (unsigned long)texts.count, succeeded);
     }
-
     if (succeeded) [self openHostAppFragment:fragment];
     else [self finish:NO];
 }

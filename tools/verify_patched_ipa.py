@@ -19,6 +19,7 @@ SHARE = APP + "/PlugIns/Share Extension.appex"
 NIB = SHARE + "/Base.lproj/MainInterface.storyboardc/UIViewController-j1y-V4-xli.nib"
 FBP = APP + "/Frameworks/flutter_blue_plus.framework/flutter_blue_plus"
 FBLE = APP + "/Frameworks/flutter_ble_peripheral.framework/flutter_ble_peripheral"
+FSPLUGIN = APP + "/Frameworks/flutter_sharing_intent.framework/flutter_sharing_intent"
 EXPECTED_GROUP = "group.app.landrop.landrop-flutter"
 NIB_CLASS = b"_TtC15Share_Extension19ShareViewController"
 
@@ -62,7 +63,7 @@ def main(argv: list[str]) -> int:
         get = lambda n: z.read(n)
 
         for required in [APP + "/Info.plist", APP + "/Runner", SHARE + "/Info.plist",
-                         SHARE + "/Share Extension", NIB, FBP, FBLE]:
+                         SHARE + "/Share Extension", NIB, FBP, FBLE, FSPLUGIN]:
             if required not in names:
                 errors.append(f"missing IPA entry: {required}")
 
@@ -95,6 +96,18 @@ def main(argv: list[str]) -> int:
         share_bin = get(SHARE + "/Share Extension")
         if NIB_CLASS not in share_bin:
             errors.append("replacement Share Extension lacks the NIB controller class")
+
+        # The rebuilt host plugin must keep its framework identity so Runner's
+        # mangled-symbol reference resolves at load time.
+        plugin_bin = get(FSPLUGIN)
+        if b"_$s22flutter_sharing_intent31SwiftFlutterSharingIntentPluginC8instanceACvau" not in plugin_bin:
+            errors.append("rebuilt flutter_sharing_intent lost the instance symbol")
+        if b"_OBJC_CLASS_$_FlutterSharingIntentPlugin" not in plugin_bin:
+            errors.append("rebuilt flutter_sharing_intent lost the ObjC plugin class")
+        if b"LANDropShareHost" not in plugin_bin:
+            errors.append("rebuilt flutter_sharing_intent is not the patched host plugin")
+        if b"SharingTimestamp" not in plugin_bin:
+            errors.append("rebuilt flutter_sharing_intent does not use the share timestamp")
 
         # Two 4-byte Bluetooth instruction patches.
         checks = [

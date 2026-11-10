@@ -37,6 +37,7 @@ required = [
     "tools/check_decrypted_ipa.py",
     "tools/patch_bluetooth_plugins.py",
     "tools/check_share_nib.py",
+    "tools/check_plugin_symbols.py",
     "tools/prepare_entitlements.py",
     "tools/verify_patched_ipa.py",
 ]
@@ -95,6 +96,27 @@ require("_TtC15Share_Extension19ShareViewController" in nib,
         "NIB checker missing original class name")
 require("must NOT be modified" in nib, "NIB checker missing no-rewrite rule")
 
+# The host plugin replacement is what makes the share actually appear in the app.
+plugin = text("patches/ios/SharingIntent/SharingIntentPlugin.swift")
+for token in [
+    "@objc(FlutterSharingIntentPlugin)",
+    "public class SwiftFlutterSharingIntentPlugin",
+    "public static let instance = SwiftFlutterSharingIntentPlugin()",
+    "flutter_sharing_intent/events-sharing",
+    "getInitialSharing",
+    "SharingTimestamp",
+    "deliverPending",
+    "preferEventSink",
+]:
+    require(token in plugin, f"host plugin replacement missing: {token}")
+require("didBecomeActive" in plugin,
+        "host plugin must retry the handoff when the app becomes active")
+
+symbols = text("tools/check_plugin_symbols.py")
+require("instanceACvau" in symbols, "plugin symbol check missing the instance symbol")
+require("register4withySo0eH9Registrar_p_tFZ" in symbols,
+        "plugin symbol check missing the register symbol")
+
 check = text("tools/check_decrypted_ipa.py")
 for token in ["cryptid", "entropy", "original-encrypted.ipa", "SC_Info",
               "--allow-encrypted-share"]:
@@ -112,6 +134,8 @@ for token in [
     "ShareViewController.m", "main.m", "-Wl,-e,_NSExtensionMain",
     "--allow-encrypted-share", "AppGroupId", "--entitlements", "ITSDRMScheme", "UISupportedDevices", "SC_Info",
     "cryptid", "-fixed-trollstore.ipa",
+    "swiftc", "SharingIntentPlugin.swift", "check_plugin_symbols.py",
+    "-module-name flutter_sharing_intent",
 ]:
     require(token in script, f"Build script missing: {token}")
 require("insert_load_dylib.py" not in script, "obsolete LC_LOAD_DYLIB injection remains")

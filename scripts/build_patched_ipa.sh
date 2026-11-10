@@ -80,14 +80,39 @@ python3 "$ROOT/tools/check_share_nib.py" \
   "$SHARE/Base.lproj/MainInterface.storyboardc/UIViewController-j1y-V4-xli.nib" \
   "$SHARE/Share Extension"
 
-# 5. Generate XML entitlements plists with literal Team IDs. TrollStore reads
+# 5. Build a replacement for the flutter_sharing_intent plugin framework.
+# The original plugin loses the payload whenever the Dart side reads through the
+# other channel than the one the launch took (cold launch only fills
+# `initialSharing`, warm launch only pushes to the event stream), which shows up
+# as the app opening with nothing selected. The replacement keeps every mangled
+# symbol Runner links against, so it is a drop-in for the same framework path.
+SWIFTC="$(xcrun --sdk iphoneos --find swiftc)"
+PLUGIN_DIR="$APP/Frameworks/flutter_sharing_intent.framework"
+FLUTTER_MODULES="$APP/Frameworks/Flutter.framework/Modules"
+"$SWIFTC" \
+  -sdk "$SDK" -target "arm64-apple-ios$DEPLOY" \
+  -module-name flutter_sharing_intent \
+  -emit-library -emit-module -emit-module-path "$BUILD/flutter_sharing_intent.swiftmodule" \
+  -O -whole-module-optimization \
+  -Xcc -fmodule-map-file="$FLUTTER_MODULES/module.modulemap" \
+  -I "$FLUTTER_MODULES" \
+  -F "$APP/Frameworks" \
+  -framework Flutter -framework Foundation -framework UIKit \
+  -install_name "@rpath/flutter_sharing_intent.framework/flutter_sharing_intent" \
+  -o "$PLUGIN_DIR/flutter_sharing_intent.new" \
+  "$ROOT/patches/ios/SharingIntent/SharingIntentPlugin.swift"
+chmod +x "$PLUGIN_DIR/flutter_sharing_intent.new"
+mv "$PLUGIN_DIR/flutter_sharing_intent.new" "$PLUGIN_DIR/flutter_sharing_intent"
+python3 "$ROOT/tools/check_plugin_symbols.py" "$PLUGIN_DIR/flutter_sharing_intent"
+
+# 6. Generate XML entitlements plists with literal Team IDs. TrollStore reads
 # entitlements from each signed Mach-O and creates App Group containers for
 # both the app and the extension. It does NOT read an entitlements file in the
 # bundle, and it does not expand Xcode $(AppIdentifierPrefix) variables.
 python3 "$ROOT/tools/prepare_entitlements.py" \
   "$BUILD/Runner.entitlements" "$BUILD/ShareExtension.entitlements"
 
-# 6. Ad-hoc sign nested frameworks/dylibs first, then the two bundles with
+# 7. Ad-hoc sign nested frameworks/dylibs first, then the two bundles with
 # their own entitlements, then the outer app. TrollStore will recursively
 # re-sign and apply its CoreTrust bypass at install time.
 find "$APP/Frameworks" -type f -perm -111 -print0 | while IFS= read -r -d '' f; do
@@ -98,7 +123,7 @@ codesign --force --sign - --timestamp=none \
 codesign --force --sign - --timestamp=none \
   --entitlements "$BUILD/Runner.entitlements" "$APP"
 
-# 7. Structural verification: no cryptid=1, no SC_Info, both 4-byte patches,
+# 8. Structural verification: no cryptid=1, no SC_Info, both 4-byte patches,
 # original NIB, URL scheme, separately signed App Group entitlements.
 rm -f "$OUTPUT_IPA"
 cd "$BUILD"
