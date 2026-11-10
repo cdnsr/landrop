@@ -249,7 +249,7 @@ static BOOL LANDropNormalizeImageFileAtURL(NSURL *url) {
         LANDropLog(@"normalised archived screenshot payload (%lu -> %lu bytes)",
                    (unsigned long)data.length, (unsigned long)image.length);
         return YES;
-    } @catch (__unused NSException *exception) {
+    } @catch (NSException *exception) {
         LANDropLog(@"image normalisation raised %@", exception.name);
         return NO;
     }
@@ -783,8 +783,21 @@ static void LANDropTryTypes(NSItemProvider *provider,
 }
 
 - (NSString *)uniqueName:(NSString *)candidate defaultExtension:(NSString *)ext {
-    NSString *name = candidate.lastPathComponent ?: @"";
-    if (name.length == 0 || [name isEqualToString:@"/"]) {
+    // The host plugin turns `file://<path>` back into a plain path by string
+    // replacement, without percent-decoding. A copied name containing spaces or
+    // non-ASCII characters would therefore resolve to a nonexistent file and the
+    // shared item would be silently dropped. Keep only characters that need no
+    // encoding in a URL path.
+    NSString *original = candidate.lastPathComponent ?: @"";
+    NSMutableString *safe = [NSMutableString string];
+    for (NSUInteger i = 0; i < original.length; i++) {
+        unichar c = [original characterAtIndex:i];
+        BOOL allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+        [safe appendFormat:@"%C", allowed ? c : (unichar)'_'];
+    }
+    NSString *name = safe;
+    if (name.length == 0 || [name isEqualToString:@"_"]) {
         return [NSString stringWithFormat:@"LANDrop-%@.%@", NSUUID.UUID.UUIDString, ext];
     }
     if (name.pathExtension.length == 0) {

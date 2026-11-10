@@ -60,6 +60,7 @@ for token in [
     "LANDropDataLooksLikeImage", "NSKeyedUnarchiver", "bplist00",
     "loadInPlaceFileRepresentationForTypeIdentifier",
     "registeredTypeIdentifiers", "NSExtensionContext (LANDropOpenURL)",
+    "percent-decoding",
     "@catch (__unused NSException *exception)",
     "dispatch_group_enter", "completeRequestReturningItems",
     "NSFileCoordinator", "LANDropCoordinatedCopyItemAtURL",

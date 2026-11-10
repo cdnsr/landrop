@@ -64,6 +64,7 @@ GitHub Actions 的 macOS runner 没有授权 Apple ID/设备密钥袋，也没�
 - 图片按 `loadFileRepresentation` → `loadInPlaceFileRepresentation` → `loadDataRepresentation` → `loadItem` 四级回退，覆盖 png/jpeg/heic/heif/tiff/gif/webp/public.image；`NSURL`、`UIImage`、`NSData` 都接受。截图场景恰恰是 provider 不肯为 `loadFileRepresentation` 落地临时文件的那种，`loadInPlace` 这一级是为它加的。
 - 截图打上标记后（标注/涂鸦）系统把内容作为**内存 UIImage** 交给扩展，请求文件表示时序列化成 `NSKeyedArchiver` 的 `bplist00` 归档，文件名却还是 `.png`。旧逻辑把归档原样复制过去，宿主拿到的是打不开的“图片”。新增 `LANDropNormalizeImageFileAtURL` 在复制后就地修复：先按签名判断（PNG/JPEG/GIF/TIFF/HEIC/RIFF），不是真图片且是 bplist 时用 `NSKeyedUnarchiver` 还原成 `UIImage`/`NSData` 再重写成 PNG；解档失败则扫描原始字节里的 PNG IEND / JPEG EOI 边界提取图像；仍失败才放弃这一路表示、继续尝试下一种，绝不把不可用的文件交给宿主。整个修复过程 `@try/@catch` 包裹，异常不会终止扩展进程。
 - 复制改为“直接 `copyItem` 优先、`NSFileCoordinator` 兜底”，避免对扩展自己容器内已可读的临时文件做多余协调而失败。
+- 落地文件名只保留 `[A-Za-z0-9._-]`，其余字符替换为 `_`。宿主插件是把 `file://<path>` 直接字符串替换成路径、**不做百分号解码**，截图默认名 `PNG image.png` 这类带空格/中文的名字会让路径失效、图片被静默丢弃。
 - 若某个 provider 第一次取载荷为空（截图标注进程交付较慢），整套流程重试一次再判定失败。
 - 公开 UTI 全不匹配的第三方/私有 provider，改用 `registeredTypeIdentifiers` 兜底，按普通文件交出，而不是直接丢弃。
 - 视频和普通文件同样尝试文件/数据/旧 item 三种 representation，并在 completion 内立刻复制进 App Group，避免临时文件失效。
