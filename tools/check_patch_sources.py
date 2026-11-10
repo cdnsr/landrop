@@ -56,13 +56,18 @@ for token in [
     "loadItemForTypeIdentifier",
     "SharingKey", "kSchemePrefix", "SharingFileTypeImage",
     "writeSharedObject", "Library/Preferences", "AppGroupId",
-    "LANDropIsArchivedPlist", "LANDropRepairScreenshotData",
-    "NSKeyedUnarchiver", "bplist00", "storeImageURL", "storeImageData",
-    "Never copy a bplist archive as .png",
+    "LANDropIsArchivedPlist", "LANDropRepairArchivedPNGAtURL",
+    "NSKeyedUnarchiver", "bplist00",
     "dispatch_group_enter", "completeRequestReturningItems",
     "NSFileCoordinator",
 ]:
     require(token in share, f"Share extension missing: {token}")
+# The known-good load/copy path must stay intact: no storeImageURL wrapper,
+# no canLoadObjectOfClass, no ImageIO gate before the file is copied.
+for forbidden in ["storeImageURL", "canLoadObjectOfClass",
+                  "CGImageSourceCreateWithData", "LANDropRepairScreenshotData"]:
+    require(forbidden not in share,
+            f"Share extension must not contain regression-prone helper: {forbidden}")
 require(share.count("{") == share.count("}"), "Share extension has unbalanced braces")
 
 nib = text("tools/check_share_nib.py")
