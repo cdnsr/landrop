@@ -967,7 +967,7 @@ static void LANDropTryTypes(NSItemProvider *provider,
     const NSTimeInterval resendAfter = 2.5;
     const NSTimeInterval pollInterval = 0.2;
     NSDate *started = [NSDate date];
-    NSDate *lastRequest = [NSDate date];
+    __block NSDate *lastRequest = [NSDate date];
     __block int attempt = 0;
     __block void (^attemptBlock)(void) = nil;
     attemptBlock = ^{
