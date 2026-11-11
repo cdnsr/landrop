@@ -58,6 +58,8 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
     private var appGroupId: String = ""
     /// Timestamp of the share this process has already handed over.
     private var deliveredStamp: Double = -1
+    /// True once this process has been on screen at least once.
+    private var hasBeenActive = false
     /// True when the current share went out through the event stream.
     private var deliveredToStream = false
 
@@ -206,14 +208,26 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
     @objc private func applicationDidBecomeActive() {
         // Tell the extension the host is up BEFORE delivering: delivery consumes
         // the payload and clears its timestamp, and the extension is waiting on
-        // this signal to stop retrying the launch request. Every retry spawns
-        // another host process, and a request still queued when the share sheet
-        // closes fires later at an unrelated moment.
+        // this signal to stop retrying the launch request.
         signalHostReady()
-        // The share sheet can foreground the app before any Dart code is ready.
-        // This is the last chance to hand the payload over.
-        deliverPending(preferEventSink: true, reason: "didBecomeActive")
-        log("app became active")
+        // Guard on the actual state: this notification can also arrive while the
+        // process is still transitioning, and delivering then hands the share to
+        // a UI that is not on screen yet.
+        guard UIApplication.shared.applicationState == .active else {
+            log("became active but not active yet; deferring delivery")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.applicationDidBecomeActive()
+            }
+            return
+        }
+        let wasActive = hasBeenActive
+        hasBeenActive = true
+        // A URL handled by an already-visible app is a fresh share the running
+        // Dart code can take immediately. On a cold start the payload stays
+        // pending until Dart asks, because pushing it before the stream exists
+        // loses it.
+        deliverPending(preferEventSink: wasActive, reason: "didBecomeActive")
+        log("app became active (wasActive=\(wasActive))")
     }
 
     /// Records that the host has picked up the share currently in the App Group.
@@ -231,8 +245,11 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
     }
 
     @objc private func applicationWillEnterForeground() {
-        // Coming back from the background: hand over anything still pending.
-        deliverPending(preferEventSink: true, reason: "willEnterForeground")
+        // Only wake up; do NOT deliver here. A process still sitting in the
+        // background receives this before the foreground process finishes
+        // launching, and delivering from there consumes the payload for a UI the
+        // user cannot see — the app then opens with nothing selected.
+        log("will enter foreground")
     }
 
     // MARK: - URL handling
@@ -250,7 +267,12 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         // never reaches the foreground still proves the host answered, and this
         // is what stops the extension from spawning further host processes.
         signalHostReady()
-        deliverPending(preferEventSink: !setInitialData, reason: "url")
+
+        // Hold the payload rather than pushing it to the stream. Pushing from a
+        // process that is still in the background (or has no Dart listener yet)
+        // consumes the share for a UI the user never sees, and the process that
+        // does become visible then finds nothing left.
+        deliverPending(preferEventSink: false, reason: "url")
         return true
     }
 

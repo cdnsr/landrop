@@ -94,6 +94,10 @@ require("kHostReadyKey" in share,
         "Share extension must wait for the host readiness signal")
 require("host ready after" in share,
         "Share extension must stop retrying when the host reports readiness")
+require("share sheet dismissed; abandoning launch retries" in share,
+        "Share extension must stop retrying once the sheet is dismissed")
+require("firstInterval" in share,
+        "Share extension must retry sooner after the first discarded request")
 
 require(share.count("{") == share.count("}"), "Share extension has unbalanced braces")
 
@@ -131,6 +135,12 @@ require("func consume()" in plugin,
         "host plugin must clear the payload only after Dart consumed it")
 require(plugin.count("consume()") >= 3,
         "host plugin must call consume() from both delivery paths")
+# Delivering from a process that is not on screen consumes the share for a UI the
+# user never sees; the visible process then finds nothing and opens empty.
+require("hasBeenActive" in plugin,
+        "host plugin must distinguish a warm share from a cold start")
+require("became active but not active yet" in plugin,
+        "host plugin must not deliver while the app is still transitioning")
 
 symbols = text("tools/check_plugin_symbols.py")
 require("instanceACvau" in symbols, "plugin symbol check missing the instance symbol")

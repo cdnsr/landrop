@@ -958,11 +958,25 @@ static void LANDropTryTypes(NSItemProvider *provider,
     LANDropLog(@"waiting for host readiness (shareStamp=%.6f)", shareStamp);
 
     const int maxAttempts = 4;
+    // Short first gap: the album extension starts slower than the screenshot
+    // one and its first request is the one most likely to be discarded, so a
+    // quick second ask is what turns "first share fails" into "first share works".
+    const NSTimeInterval firstInterval = 0.4;
     const NSTimeInterval interval = 0.7;
     __block int attempt = 0;
     __block void (^attemptBlock)(void) = nil;
     attemptBlock = ^{
         if (completed) return;
+
+        // The share sheet has been dismissed: this controller is no longer in a
+        // window, so its responder chain cannot reach an openURL: handler and a
+        // pending request would fire at some unrelated later moment (LANDrop
+        // opening out of nowhere). Stop here instead of retrying into the void.
+        if (self.view.window == nil && attempt > 0) {
+            LANDropLog(@"share sheet dismissed; abandoning launch retries");
+            completeOnce();
+            return;
+        }
 
         // The host is on screen for this share: stop requesting, or the extra
         // launches fight each other and a leftover request fires later.
@@ -987,7 +1001,8 @@ static void LANDropTryTypes(NSItemProvider *provider,
             });
             return;
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interval * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)((attempt == 1 ? firstInterval : interval) * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), attemptBlock);
     };
     attemptBlock();
