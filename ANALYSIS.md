@@ -151,6 +151,28 @@ patch10 的重试解决了「第一次必失败」，但引入了新问题。日
 
 patch11 加了就绪握手：扩展在发起第一次请求前记下本次分享的 `SharingTimestamp`；宿主在 `didBecomeActive` 和收到 URL 时都会把该时间戳写入 `SharingHostReady`（必须写在投递之前，因为投递会消费掉时间戳）；扩展每轮重试前比较两者，一旦 `ready >= shareStamp` 就立即收工，不再发起任何请求。`consume()` 同时清掉就绪标记，避免下一次分享误判。
 
+## Bug 9：后台进程抢走载荷，可见进程拿到空
+
+09:24 那段日志把问题暴露得很清楚：
+
+```
+09:24:27 Runner[3735] willEnterForeground: delivered 124 chars to stream
+09:24:28 Runner[3745] app became active
+09:24:28 Runner[3745] getInitialSharing -> nil (stream=false)
+```
+
+3735 是还挂在后台的旧进程，它先收到 `willEnterForeground`，把载荷投递给**自己**的事件流并清空；紧接着 3745 冷启动成为真正可见的进程，却因载荷已被消费而读到 nil。于是界面打开是空的——载荷被看不见的进程拿走了。这就是「只有手动划掉后台才正常」的原因：杀掉后台强制全新进程，Dart 与插件在同一个进程里，不会出现这种错位。
+
+同一段日志还出现 `host app launch requested (responderChain=0)`：分享面板已被系统收掉，扩展视图脱离窗口，响应链上已经没有 `openURL:` 的处理者，但重试循环还在跑，残留请求随后在无关时刻弹出 App。
+
+patch12 的修法：
+
+- 只在进程真正处于 `.active` 时才投递，`didBecomeActive` 里先校验 `applicationState`，未就绪则延后 0.3 秒重试。
+- 用 `hasBeenActive` 区分「热启动的新分享」（推事件流，Dart 已在跑）与「冷启动」（只暂存，等 Dart 来取）。冷启动时推送会打给尚不存在的监听者，载荷就丢了。
+- `willEnterForeground` 不再投递，只记录；`handleUrl` 也只暂存不推送，避免后台进程抢先消费。
+- 扩展每次重试前检查 `self.view.window == nil`，面板已消失就放弃重试，不再产生延迟弹窗。
+- 首次重试间隔缩短到 0.4 秒：相册扩展比截图扩展启动慢，第一个请求最容易被系统丢弃，快速补一次能把「首次失败」变成「首次成功」。
+
 ## 签名与 entitlements（巨魔专用）
 
 TrollStore 2.x 会：从每个 Mach-O 的 `LC_CODE_SIGNATURE` dump entitlements → 用 `ldid` 递归 ad-hoc 伪造签名 → 对所有 Mach-O 应用 CoreTrust bypass → 注册 App Group 容器与 PlugIns。它**不会**读取 bundle 里另放的 `entitlements.plist`，也不会展开 Xcode 变量 `$(AppIdentifierPrefix)`。完全不签名会导致 app 与 appex 拿不到共享 App Group。
