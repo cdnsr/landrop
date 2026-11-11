@@ -173,6 +173,27 @@ patch12 的修法：
 - 扩展每次重试前检查 `self.view.window == nil`，面板已消失就放弃重试，不再产生延迟弹窗。
 - 首次重试间隔缩短到 0.4 秒：相册扩展比截图扩展启动慢，第一个请求最容易被系统丢弃，快速补一次能把「首次失败」变成「首次成功」。
 
+## Bug 10：分享面板提前关闭，用户被丢回桌面
+
+日志给了一个之前没注意到的时序：
+
+```
+09:49:09 share sheet dismissed; abandoning launch retries   ← 扩展在此完成并退出
+09:49:13 Runner[4233] registration
+09:49:14 Runner[4233] app became active (wasActive=false)
+```
+
+扩展在 App 起来之前 **5 秒**就已经 `completeRequest` 结束。面板一关，系统就回到桌面，随后 App 才在后台启动并成为 active。所以载荷其实一直是对的（手动打开就能看到已选中），坏的是收尾时序。
+
+两个错误都在我这边：
+
+- `self.view.window == nil` 这个判断不可靠。系统在切换 App 时会先把面板从窗口上摘下来，这被误判成「面板已关闭」，于是 attempt 1 之后就把重试全砍了。日志里那条 `share sheet dismissed; abandoning launch retries` 出现在第 1 次尝试之后，正是这个误判。
+- 用固定次数（4 次）而不是固定时长来界定等待，冷启动需要几秒，次数到了就提前收尾。
+
+patch13 改为按时间预算：面板保持到宿主确认就绪（`SharingHostReady`）才关闭，期间按 0.4 秒 / 0.7 秒节奏补请求，最长等 8 秒。同时删掉 `view.window` 判断。
+
+另外宿主侧改了一处：投递到事件流后**不再立即清空**载荷，而是同时保留给 `getInitialSharing`。事件流是 fire-and-forget，Dart 若那一刻还没建好监听，事件会被丢弃，界面就空着；保留副本让两条路径都能拿到，`getInitialSharing` 也不因为「已推过流」而返回 nil。
+
 ## 签名与 entitlements（巨魔专用）
 
 TrollStore 2.x 会：从每个 Mach-O 的 `LC_CODE_SIGNATURE` dump entitlements → 用 `ldid` 递归 ad-hoc 伪造签名 → 对所有 Mach-O 应用 CoreTrust bypass → 注册 App Group 容器与 PlugIns。它**不会**读取 bundle 里另放的 `entitlements.plist`，也不会展开 Xcode 变量 `$(AppIdentifierPrefix)`。完全不签名会导致 app 与 appex 拿不到共享 App Group。
