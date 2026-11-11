@@ -100,6 +100,11 @@ require("view.window == nil" not in share,
         "Share extension must not infer dismissal from the view window")
 require("budget" in share,
         "Share extension must bound the wait instead of counting attempts")
+# Re-requesting while the host is still bringing itself forward spawns a second
+# process that replaces the first one, which is the "album share cold-starts even
+# though the app was running" symptom.
+require("resendAfter" in share,
+        "Share extension must not interrupt a launch that is already in progress")
 require("firstInterval" in share,
         "Share extension must retry sooner after the first discarded request")
 
@@ -149,6 +154,10 @@ require("hasBeenActive" in plugin,
         "host plugin must distinguish a warm share from a cold start")
 require("became active but not active yet" in plugin,
         "host plugin must not deliver while the app is still transitioning")
+# The album share reaches willEnterForeground long before it is active, and the
+# extension is waiting for this signal to stop re-requesting the launch.
+require("will enter foreground" in plugin,
+        "host plugin must publish readiness from willEnterForeground")
 
 symbols = text("tools/check_plugin_symbols.py")
 require("instanceACvau" in symbols, "plugin symbol check missing the instance symbol")

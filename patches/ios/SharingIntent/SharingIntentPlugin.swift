@@ -247,10 +247,12 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
     }
 
     @objc private func applicationWillEnterForeground() {
-        // Only wake up; do NOT deliver here. A process still sitting in the
-        // background receives this before the foreground process finishes
-        // launching, and delivering from there consumes the payload for a UI the
-        // user cannot see — the app then opens with nothing selected.
+        // Publish readiness here too. On an album share the host often reaches
+        // this point well before it finishes becoming active, and the extension
+        // is holding the sheet open waiting for exactly this signal. Without it
+        // the extension sends another launch request, which replaces the process
+        // that was already on its way to the foreground.
+        signalHostReady()
         log("will enter foreground")
     }
 
