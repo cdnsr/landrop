@@ -113,9 +113,28 @@ patch8 之后扩展侧每次都能正确写入载荷并请求启动宿主，但�
 
 patch9 的修法：扩展不再请求完就退出，而是等 `NSExtensionContext.openURL:completionHandler:` 的回调，回调后再停留 2 秒让宿主完成冷启动，另有 4 秒硬上限防止面板卡死。首选路径也改回文档支持的 context API（此前它一用就崩是另一个 bug，现在没有崩溃了），仅在回调返回失败时才退回响应链 `openURL:`。
 
-宿主侧不参与拉起：插件注册阶段调用 `UIApplication.shared.open` 会直接终止进程（见 Bug 5），而宿主用公开 API 无法把自己带到前台，所以这段代码在 patch9 中彻底移除，`UIApplication.shared.open` 在产物里出现 0 次。
+宿主侧不参与拉起：插件注册阶段调用 `UIApplication.shared.open` 会直接终止进程（见 Bug 6），而宿主用公开 API 无法把自己带到前台，所以这段代码在 patch9 中彻底移除，`UIApplication.shared.open` 在产物里出现 0 次。
 
 ## Bug 6：patch7 启动即闪退
+
+patch7 在插件注册阶段调用了 `UIApplication.shared.open`，触发系统终止进程。同一版还把扩展的首选打开方式换成了 `NSExtensionContext.openURL:`，而日志证明此前真正生效的是响应链那次调用，换掉后连分享都拉不起 App。patch8 两处都改回：宿主侧完全移除自打开（`UIApplication` 仅剩生命周期方法签名与通知名），扩展侧恢复为响应链 `openURL:` 只调用一次，再延迟 0.8 秒完成请求。
+
+## Bug 7：启动请求单次不可靠（第一次分享必失败）
+
+patch9 的日志给出了决定性证据：
+
+```
+08:47:35 context open finished (success=0)          ← context API 每次都失败
+08:47:35 host app launch requested (responderChain=1)
+08:47:35 Runner[2914] url received (initial=true)   ← 进程起了，但从未 became active
+08:47:40 finishing extension after launch ceiling   ← 扩展等到上限才退出
+```
+
+第二次分享时起了**两个** Runner：2921 收到 URL 也没 active，紧接着 **2923 才 `app became active`** 并消费载荷。
+
+也就是说：`NSExtensionContext.openURL:` 在本机恒定返回 `success=0`，等于不可用；唯一有效的是响应链 `openURL:`，但**单次请求有概率被系统丢弃**——宿主进程被拉起、收到 URL，却没被切到前台，随后被回收，分享面板跟着关闭。
+
+patch10 的修法：把响应链请求重试 4 次、间隔 0.7 秒，最后一次之后再留 2 秒让请求落地才退出。重复同一 URL 是安全的：宿主用 `SharingTimestamp` 去重，同一份载荷只投递一次、只消费一次。
 
 patch7 在插件注册阶段调用了 `UIApplication.shared.open`，触发系统终止进程。同一版还把扩展的首选打开方式换成了 `NSExtensionContext.openURL:`，而日志证明此前真正生效的是响应链那次调用，换掉后连分享都拉不起 App。patch8 两处都改回：宿主侧完全移除自打开（`UIApplication` 仅剩生命周期方法签名与通知名），扩展侧恢复为响应链 `openURL:` 只调用一次，再延迟 0.8 秒完成请求。
 
