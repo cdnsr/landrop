@@ -957,50 +957,46 @@ static void LANDropTryTypes(NSItemProvider *provider,
     double shareStamp = [shared doubleForKey:kTimestampKey];
     LANDropLog(@"waiting for host readiness (shareStamp=%.6f)", shareStamp);
 
-    const int maxAttempts = 4;
-    // Short first gap: the album extension starts slower than the screenshot
-    // one and its first request is the one most likely to be discarded, so a
-    // quick second ask is what turns "first share fails" into "first share works".
     const NSTimeInterval firstInterval = 0.4;
     const NSTimeInterval interval = 0.7;
+    // Overall budget for waiting on the host. The sheet must stay up for this
+    // long: the host is a cold start and needs several seconds to boot Flutter.
+    // Finishing early closes the sheet and drops the user on the home screen,
+    // which is exactly the "flashes and returns to desktop" complaint.
+    const NSTimeInterval budget = 8.0;
+    NSDate *started = [NSDate date];
     __block int attempt = 0;
     __block void (^attemptBlock)(void) = nil;
     attemptBlock = ^{
         if (completed) return;
-
-        // The share sheet has been dismissed: this controller is no longer in a
-        // window, so its responder chain cannot reach an openURL: handler and a
-        // pending request would fire at some unrelated later moment (LANDrop
-        // opening out of nowhere). Stop here instead of retrying into the void.
-        if (self.view.window == nil && attempt > 0) {
-            LANDropLog(@"share sheet dismissed; abandoning launch retries");
-            completeOnce();
-            return;
-        }
 
         // The host is on screen for this share: stop requesting, or the extra
         // launches fight each other and a leftover request fires later.
         double ready = [[[NSUserDefaults alloc] initWithSuiteName:self.appGroupId]
                         doubleForKey:kHostReadyKey];
         if (shareStamp > 0 && ready >= shareStamp) {
-            LANDropLog(@"host ready after %d attempt(s); stopping", attempt);
+            LANDropLog(@"host ready after %d attempt(s); closing sheet", attempt);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), completeOnce);
             return;
         }
 
-        attempt += 1;
-        [self launchViaResponderChain:url];
-        LANDropLog(@"launch attempt %d of %d", attempt, maxAttempts);
-
-        if (attempt >= maxAttempts) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                LANDropLog(@"finishing extension after %d launch attempts", attempt);
-                completeOnce();
-            });
+        NSTimeInterval elapsed = -[started timeIntervalSinceNow];
+        if (elapsed >= budget) {
+            LANDropLog(@"host not ready after %.1fs and %d attempt(s); closing sheet",
+                       elapsed, attempt);
+            completeOnce();
             return;
         }
+
+        attempt += 1;
+        [self launchViaResponderChain:url];
+        LANDropLog(@"launch attempt %d (elapsed=%.1fs)", attempt, elapsed);
+
+        // Keep asking on a fixed cadence until the host reports readiness or the
+        // budget runs out. Do not bail out because the view is off-window: the
+        // system detaches the sheet while switching apps, and treating that as
+        // "dismissed" stops the retries that are still needed.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)((attempt == 1 ? firstInterval : interval) * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), attemptBlock);

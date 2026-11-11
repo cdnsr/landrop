@@ -114,9 +114,11 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         switch call.method {
         case "getInitialSharing":
             deliverPending(preferEventSink: false, reason: "getInitialSharing")
-            // Only hand the payload over if the stream did not already take it;
-            // the two paths are alternatives, not a fan-out.
-            let payload = deliveredToStream ? nil : initialSharing
+            // Return whatever is still held. The event stream is fire-and-forget:
+            // if Dart had no listener at that moment the push was dropped, so the
+            // payload must remain available here rather than being suppressed
+            // just because it was also sent to the stream.
+            let payload = initialSharing
             initialSharing = nil
             latestSharing = nil
             log("getInitialSharing -> \(payload.map { "\($0.count) chars" } ?? "nil")"
@@ -305,10 +307,16 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         latestSharing = json
 
         if preferEventSink, let sink = eventSink {
+            // Push to the running Dart code, but keep a copy for
+            // getInitialSharing as well: the stream listener may attach before
+            // the share screen exists, in which case the event is dropped by the
+            // Dart side and the app opens with nothing selected. Whichever path
+            // Dart takes, it finds the payload; `consume` runs when one of them
+            // reports it took the share.
+            initialSharing = json
             sink(json)
             deliveredToStream = true
-            consume()
-            log("\(reason): delivered \(json.count) chars to stream")
+            log("\(reason): delivered \(json.count) chars to stream and kept for getInitialSharing")
         } else {
             initialSharing = json
             log("\(reason): held \(json.count) chars for getInitialSharing")

@@ -94,8 +94,12 @@ require("kHostReadyKey" in share,
         "Share extension must wait for the host readiness signal")
 require("host ready after" in share,
         "Share extension must stop retrying when the host reports readiness")
-require("share sheet dismissed; abandoning launch retries" in share,
-        "Share extension must stop retrying once the sheet is dismissed")
+# The system detaches the sheet while switching apps, so treating an off-window
+# view as "dismissed" aborts the retries that are still needed.
+require("view.window == nil" not in share,
+        "Share extension must not infer dismissal from the view window")
+require("budget" in share,
+        "Share extension must bound the wait instead of counting attempts")
 require("firstInterval" in share,
         "Share extension must retry sooner after the first discarded request")
 
@@ -133,8 +137,12 @@ require("UIApplication.shared.open" not in plugin,
 # Runner for the URL and kill it before Dart ever asks for the share.
 require("func consume()" in plugin,
         "host plugin must clear the payload only after Dart consumed it")
-require(plugin.count("consume()") >= 3,
-        "host plugin must call consume() from both delivery paths")
+require(plugin.count("consume()") >= 2,
+        "host plugin must call consume() when a delivery path takes the payload")
+# The stream push is fire-and-forget: if Dart has no listener yet the event is
+# dropped, so the payload has to stay available through getInitialSharing.
+require("and kept for getInitialSharing" in plugin,
+        "host plugin must keep the payload after pushing to the stream")
 # Delivering from a process that is not on screen consumes the share for a UI the
 # user never sees; the visible process then finds nothing and opens empty.
 require("hasBeenActive" in plugin,
