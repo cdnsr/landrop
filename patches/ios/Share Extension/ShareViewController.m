@@ -26,6 +26,7 @@
 static NSString * const kSchemePrefix = @"SharingMedia";
 static NSString * const kUserDefaultsKey = @"SharingKey";
 static NSString * const kTimestampKey = @"SharingTimestamp";
+static NSString * const kHostReadyKey = @"SharingHostReady";
 static NSString * const kAppGroupIdKey = @"AppGroupId";
 static NSString * const kFallbackHostBundleId = @"app.landrop.landrop-flutter";
 static NSString * const kLogFileName = @"landrop-share.log";
@@ -945,21 +946,40 @@ static void LANDropTryTypes(NSItemProvider *provider,
     // that actually works. A single request is also unreliable: the system
     // sometimes discards it, leaving the host spawned in the background with
     // `url received` but no `app became active`, and the process is then
-    // reclaimed — the share sheet just closes. So repeat the request a few times
-    // with a gap. Repeating the same URL is safe: the host consumes the payload
-    // once and ignores duplicate deliveries.
+    // reclaimed — the share sheet just closes.
+    //
+    // Blind retries are worse than useless here: each one spawns another host
+    // process, and a request still queued when the sheet closes fires later at
+    // an unrelated moment (opening LANDrop out of nowhere). So retry only until
+    // the host reports it reached the foreground for this share, which the host
+    // plugin records in `SharingHostReady`.
+    NSUserDefaults *shared = [[NSUserDefaults alloc] initWithSuiteName:self.appGroupId];
+    double shareStamp = [shared doubleForKey:kTimestampKey];
+    LANDropLog(@"waiting for host readiness (shareStamp=%.6f)", shareStamp);
+
     const int maxAttempts = 4;
     const NSTimeInterval interval = 0.7;
     __block int attempt = 0;
     __block void (^attemptBlock)(void) = nil;
     attemptBlock = ^{
         if (completed) return;
+
+        // The host is on screen for this share: stop requesting, or the extra
+        // launches fight each other and a leftover request fires later.
+        double ready = [[[NSUserDefaults alloc] initWithSuiteName:self.appGroupId]
+                        doubleForKey:kHostReadyKey];
+        if (shareStamp > 0 && ready >= shareStamp) {
+            LANDropLog(@"host ready after %d attempt(s); stopping", attempt);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), completeOnce);
+            return;
+        }
+
         attempt += 1;
         [self launchViaResponderChain:url];
         LANDropLog(@"launch attempt %d of %d", attempt, maxAttempts);
 
         if (attempt >= maxAttempts) {
-            // Give the last request time to land, then let the sheet close.
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 LANDropLog(@"finishing extension after %d launch attempts", attempt);

@@ -88,10 +88,13 @@ require("Library/Preferences" not in share,
         "Share extension must not write the App Group plist behind cfprefsd")
 require("objectForKey:key" in share,
         "Share extension must read the payload back through the host's API")
-# The extension must not tear itself down the instant it asks for the switch,
-# or the system cancels the launch and the share sheet just closes.
-require("completeOnce" in share,
-        "Share extension must delay completion until the host app is switched to")
+# The extension must stop retrying once the host answers: every retry spawns
+# another host process, and a request left queued fires later at random.
+require("kHostReadyKey" in share,
+        "Share extension must wait for the host readiness signal")
+require("host ready after" in share,
+        "Share extension must stop retrying when the host reports readiness")
+
 require(share.count("{") == share.count("}"), "Share extension has unbalanced braces")
 
 nib = text("tools/check_share_nib.py")
@@ -109,9 +112,11 @@ for token in [
     "flutter_sharing_intent/events-sharing",
     "getInitialSharing",
     "SharingTimestamp",
+    "SharingHostReady",
     "deliverPending",
     "preferEventSink",
     "willEnterForeground",
+    "signalHostReady",
 ]:
     require(token in plugin, f"host plugin replacement missing: {token}")
 require("didBecomeActive" in plugin,

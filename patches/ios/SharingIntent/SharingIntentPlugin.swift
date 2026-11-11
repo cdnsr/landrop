@@ -32,6 +32,7 @@ import UIKit
 private let kSchemePrefix = "SharingMedia"
 private let kUserDefaultsKey = "SharingKey"
 private let kTimestampKey = "SharingTimestamp"
+private let kHostReadyKey = "SharingHostReady"
 private let kEventsChannelMedia = "flutter_sharing_intent/events-sharing"
 private let kMethodChannel = "flutter_sharing_intent"
 private let kLogFileName = "landrop-share.log"
@@ -203,10 +204,30 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
     }
 
     @objc private func applicationDidBecomeActive() {
+        // Tell the extension the host is up BEFORE delivering: delivery consumes
+        // the payload and clears its timestamp, and the extension is waiting on
+        // this signal to stop retrying the launch request. Every retry spawns
+        // another host process, and a request still queued when the share sheet
+        // closes fires later at an unrelated moment.
+        signalHostReady()
         // The share sheet can foreground the app before any Dart code is ready.
         // This is the last chance to hand the payload over.
         deliverPending(preferEventSink: true, reason: "didBecomeActive")
         log("app became active")
+    }
+
+    /// Records that the host has picked up the share currently in the App Group.
+    /// The extension compares this against the payload timestamp and stops
+    /// retrying its launch request once it matches. Every retry spawns another
+    /// host process, and a request still queued when the share sheet closes
+    /// fires later at an unrelated moment (LANDrop opening out of nowhere), so
+    /// this signal has to be written before the payload is consumed.
+    private func signalHostReady() {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+        let stamp = defaults.double(forKey: kTimestampKey)
+        guard stamp > 0 else { return }
+        defaults.set(stamp, forKey: kHostReadyKey)
+        defaults.synchronize()
     }
 
     @objc private func applicationWillEnterForeground() {
@@ -224,6 +245,11 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         // The URL only acts as a trigger. The payload itself always comes from
         // the App Group, which the extension wrote before opening us.
         log("url received (fragment=\(url.fragment ?? "-"), initial=\(setInitialData))")
+
+        // Record readiness here as well as in didBecomeActive: a launch that
+        // never reaches the foreground still proves the host answered, and this
+        // is what stops the extension from spawning further host processes.
+        signalHostReady()
         deliverPending(preferEventSink: !setInitialData, reason: "url")
         return true
     }
@@ -273,6 +299,7 @@ public class SwiftFlutterSharingIntentPlugin: NSObject, FlutterPlugin, FlutterSt
         guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
         defaults.removeObject(forKey: kUserDefaultsKey)
         defaults.removeObject(forKey: kTimestampKey)
+        defaults.removeObject(forKey: kHostReadyKey)
         defaults.synchronize()
         log("payload consumed and cleared")
     }
