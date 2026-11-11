@@ -136,7 +136,20 @@ patch9 的日志给出了决定性证据：
 
 patch10 的修法：把响应链请求重试 4 次、间隔 0.7 秒，最后一次之后再留 2 秒让请求落地才退出。重复同一 URL 是安全的：宿主用 `SharingTimestamp` 去重，同一份载荷只投递一次、只消费一次。
 
-patch7 在插件注册阶段调用了 `UIApplication.shared.open`，触发系统终止进程。同一版还把扩展的首选打开方式换成了 `NSExtensionContext.openURL:`，而日志证明此前真正生效的是响应链那次调用，换掉后连分享都拉不起 App。patch8 两处都改回：宿主侧完全移除自打开（`UIApplication` 仅剩生命周期方法签名与通知名），扩展侧恢复为响应链 `openURL:` 只调用一次，再延迟 0.8 秒完成请求。
+## Bug 8：盲目重试导致多余进程与延迟弹窗
+
+patch10 的重试解决了「第一次必失败」，但引入了新问题。日志显示：
+
+```
+09:05:23 Runner[3394] app became active      ← 第二次启动已成功，App 在前台
+09:05:24 launch attempt 2 of 4               ← 扩展不知道，继续发
+09:05:27 launch attempt 3 of 4
+09:05:28 Runner[3397] app became active      ← 又起了一个进程
+```
+
+扩展无法感知宿主已在前台，于是继续盲目重试。每次重试都拉起新的 Runner（3392 → 3394 → 3396 → 3397），新进程把上一个半启动的实例顶掉；而排在队列里的打开请求没有立即执行，一直等到相册退到后台才触发——这就是「手动打开相册，LANDrop 反而自己弹出来」。
+
+patch11 加了就绪握手：扩展在发起第一次请求前记下本次分享的 `SharingTimestamp`；宿主在 `didBecomeActive` 和收到 URL 时都会把该时间戳写入 `SharingHostReady`（必须写在投递之前，因为投递会消费掉时间戳）；扩展每轮重试前比较两者，一旦 `ready >= shareStamp` 就立即收工，不再发起任何请求。`consume()` 同时清掉就绪标记，避免下一次分享误判。
 
 ## 签名与 entitlements（巨魔专用）
 
