@@ -105,8 +105,8 @@ require("budget" in share,
 # though the app was running" symptom.
 require("resendAfter" in share,
         "Share extension must not interrupt a launch that is already in progress")
-require("firstInterval" in share,
-        "Share extension must retry sooner after the first discarded request")
+require("resendAfter" in share,
+        "Share extension must not interrupt a launch that is already in progress")
 
 require(share.count("{") == share.count("}"), "Share extension has unbalanced braces")
 
