@@ -940,35 +940,37 @@ static void LANDropTryTypes(NSItemProvider *provider,
         [context completeRequestReturningItems:@[] completionHandler:nil];
     };
 
-    // Ask the system to switch to the host app through the documented
-    // NSExtensionContext API. This is the request the system actually acts on;
-    // the private responder-chain openURL: is kept only as a fallback.
-    __block BOOL requested = NO;
-    if ([context respondsToSelector:@selector(openURL:completionHandler:)]) {
-        requested = YES;
-        [context openURL:url completionHandler:^(BOOL success) {
-            LANDropLog(@"context open finished (success=%d)", success);
-            if (!success) { [self launchViaResponderChain:url]; }
-            // Give the host app time to finish its cold start before this
-            // process disappears; exiting earlier lets the system reclaim the
-            // half-started host process and the share sheet just closes.
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), completeOnce);
-        }];
-    }
-    if (!requested) {
+    // The documented context API reports failure on this system every time
+    // (`success=0`), so the private responder-chain openURL: is the only path
+    // that actually works. A single request is also unreliable: the system
+    // sometimes discards it, leaving the host spawned in the background with
+    // `url received` but no `app became active`, and the process is then
+    // reclaimed — the share sheet just closes. So repeat the request a few times
+    // with a gap. Repeating the same URL is safe: the host consumes the payload
+    // once and ignores duplicate deliveries.
+    const int maxAttempts = 4;
+    const NSTimeInterval interval = 0.7;
+    __block int attempt = 0;
+    __block void (^attemptBlock)(void) = nil;
+    attemptBlock = ^{
+        if (completed) return;
+        attempt += 1;
         [self launchViaResponderChain:url];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), completeOnce);
-    }
+        LANDropLog(@"launch attempt %d of %d", attempt, maxAttempts);
 
-    // Hard ceiling: never leave the share sheet stuck if the system never calls
-    // back at all.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        LANDropLog(@"finishing extension after launch ceiling");
-        completeOnce();
-    });
+        if (attempt >= maxAttempts) {
+            // Give the last request time to land, then let the sheet close.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                LANDropLog(@"finishing extension after %d launch attempts", attempt);
+                completeOnce();
+            });
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interval * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), attemptBlock);
+    };
+    attemptBlock();
 }
 
 /// Legacy launch path: the private openURL: on the responder chain, exactly
