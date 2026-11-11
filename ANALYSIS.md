@@ -194,6 +194,25 @@ patch13 改为按时间预算：面板保持到宿主确认就绪（`SharingHost
 
 另外宿主侧改了一处：投递到事件流后**不再立即清空**载荷，而是同时保留给 `getInitialSharing`。事件流是 fire-and-forget，Dart 若那一刻还没建好监听，事件会被丢弃，界面就空着；保留副本让两条路径都能拿到，`getInitialSharing` 也不因为「已推过流」而返回 nil。
 
+## Bug 11：相册分享时，补发的启动请求打断了正在进行的切换
+
+日志把截图和相册的差别摆得很清楚：
+
+截图（成功）：`launch attempt 1` → 宿主 5465 直接 `app became active` → `host ready after 1 attempt`，没有第二次请求。
+
+相册（失败）：`launch attempt 1` → 5465 只走到 `will enter foreground`（正在切前台）→ 0.4 秒后扩展判定「未就绪」→ 发出 `launch attempt 2` → 5472 被拉起、5465 消失 → 6 秒后 5474 才 active。
+
+也就是说**第二次请求打断了正在进行的切换**，把已有进程换成新进程。这正是「App 明明已启动却又冷启动一次」的成因：截图快，0.4 秒内就绪；相册慢，0.4 秒没等到就补刀，反而把好事搅了。
+
+patch14 拆开两个节奏：
+
+- 检查就绪改为每 0.2 秒一次，宿主一有回应立刻关面板，不再干等。
+- 补发请求改为「至少间隔 2.5 秒」，且只在宿主完全没反应时才发，避免打断进行中的切换。
+- 宿主在 `willEnterForeground` 也发布就绪信号——相册场景下它先到这里，再花几秒才 active，而这个信号正是扩展等待的。
+- 等待上限仍是 8 秒。
+
+编译上踩到一个坑：`lastRequest` 在 block 内被重新赋值，必须声明 `__block`，否则 clang 报 `variable is not assignable`。
+
 ## 签名与 entitlements（巨魔专用）
 
 TrollStore 2.x 会：从每个 Mach-O 的 `LC_CODE_SIGNATURE` dump entitlements → 用 `ldid` 递归 ad-hoc 伪造签名 → 对所有 Mach-O 应用 CoreTrust bypass → 注册 App Group 容器与 PlugIns。它**不会**读取 bundle 里另放的 `entitlements.plist`，也不会展开 Xcode 变量 `$(AppIdentifierPrefix)`。完全不签名会导致 app 与 appex 拿不到共享 App Group。
